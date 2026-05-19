@@ -3,9 +3,16 @@ import { noCache } from '@/lib/api-response';
 import { publishPages } from '@/lib/services/pageService';
 import { publishCollectionWithItems, groupItemsByCollection, cleanupDeletedCollections } from '@/lib/services/collectionService';
 import { publishLocalisation } from '@/lib/services/localisationService';
+import type { PublishLocalisationResult } from '@/lib/services/localisationService';
 import { publishFolders } from '@/lib/services/folderService';
 import { publishCSS, savePublishedAt } from '@/lib/services/settingsService';
-import { clearAllCache, selectiveInvalidation, warmRoutes, getAllPublishedRoutes } from '@/lib/services/cacheService';
+import {
+  clearAllCache,
+  selectiveInvalidation,
+  warmRoutes,
+  getAllPublishedRoutes,
+  invalidateForLocalisationChanges,
+} from '@/lib/services/cacheService';
 import { findAffectedPages } from '@/lib/repositories/pageLayersRepository';
 import { getAllDraftPages, hardDeleteSoftDeletedPages } from '@/lib/repositories/pageRepository';
 import { publishComponents, getUnpublishedComponents, hardDeleteSoftDeletedComponents } from '@/lib/repositories/componentRepository';
@@ -148,6 +155,7 @@ export async function POST(request: NextRequest) {
     const changedLayerStyleIds: string[] = [];
     const deletedCollectionItemSlugs: Map<string, string[]> = new Map();
     const renamedPageOldRoutes: string[] = [];
+    let localisationResult: PublishLocalisationResult | null = null;
 
     // Publish folders first (pages depend on them)
     {
@@ -492,7 +500,7 @@ export async function POST(request: NextRequest) {
       // Locales and translations
       if (publishLocales) {
         try {
-          const localisationResult = await publishLocalisation();
+          localisationResult = await publishLocalisation();
           result.changes.locales = localisationResult.locales;
           result.changes.translations = localisationResult.translations;
           stats.tables.locales.added = localisationResult.locales;
@@ -546,10 +554,11 @@ export async function POST(request: NextRequest) {
         globalChangedReason = `color hash check failed: ${err instanceof Error ? err.message : 'unknown'}`;
       }
 
-      // NOTE: Locales/translations are published on every full publish but
-      // publishLocalisation() counts all active drafts, not actual changes.
-      // These resources are tagged with 'all-pages' and get refreshed via
-      // selectiveInvalidation's revalidateTag call for any affected pages.
+      // Locales/translations live in a separate table — their changes don't
+      // affect page/component content_hash, so selective page invalidation
+      // misses them. We compute exact locale-prefixed URL invalidation
+      // below from `localisationResult.changedTranslations` /
+      // `changedLocales`, after the main selective invalidation runs.
 
       // Find pages indirectly affected by changed components, styles, collections
       // Single scan of draft page_layers instead of one scan per resource type
@@ -624,9 +633,43 @@ export async function POST(request: NextRequest) {
       // because a color variable changed. Capped inside warmRoutes.
       // Deleted/renamed routes are skipped intentionally — their URLs no
       // longer resolve.
-      const liveRoutesToWarm = invalidationResult.strategy === 'selective'
+      let liveRoutesToWarm = invalidationResult.strategy === 'selective'
         ? [...invalidationResult.invalidatedRoutes]
         : await getAllPublishedRoutes();
+
+      // Locale & translation invalidation: compute exact locale-prefixed
+      // URLs affected by translation/locale changes and layer them onto the
+      // selective set. NEW routes (current live URLs) get warmed; OLD
+      // routes (orphaned slug/locale renames) are invalidated only.
+      // Skipped under full invalidation — already covered by clearAllCache.
+      if (localisationResult && invalidationResult.strategy === 'selective') {
+        try {
+          const localeInv = await invalidateForLocalisationChanges(localisationResult);
+          if (localeInv.needsFullInvalidation) {
+            await clearAllCache();
+            liveRoutesToWarm = await getAllPublishedRoutes();
+            console.log(
+              `[Cache] localisation: escalated to full invalidation${localeInv.reason ? ` (${localeInv.reason})` : ''}`,
+            );
+          } else {
+            if (localeInv.newRoutes.length > 0) {
+              liveRoutesToWarm.push(...localeInv.newRoutes);
+              invalidationResult.invalidatedRoutes.push(...localeInv.newRoutes);
+            }
+            if (localeInv.oldRoutes.length > 0) {
+              invalidationResult.invalidatedRoutes.push(...localeInv.oldRoutes);
+            }
+            if (localeInv.newRoutes.length > 0 || localeInv.oldRoutes.length > 0) {
+              console.log(
+                `[Cache] localisation: invalidated ${localeInv.newRoutes.length} live + ${localeInv.oldRoutes.length} orphaned locale route(s) ` +
+                `(${localisationResult.changedTranslations.length} translation change(s), ${localisationResult.changedLocales.length} locale change(s))`,
+              );
+            }
+          }
+        } catch (err) {
+          console.warn('[Cache] localisation invalidation failed:', err instanceof Error ? err.message : err);
+        }
+      }
 
       // Invalidate routes of deleted/renamed pages and deleted CMS items
       if (invalidationResult.strategy !== 'full') {
