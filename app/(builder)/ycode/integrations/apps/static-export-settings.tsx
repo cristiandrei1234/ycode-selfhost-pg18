@@ -19,28 +19,9 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { Spinner } from '@/components/ui/spinner'
+import type { ExportConfig, OutputTarget } from '@/lib/apps/static-export/types'
 
-// =============================================================================
-// Types — mirrors lib/apps/static-export/types.ts ExportConfig
-// =============================================================================
-
-type OutputTarget = 'local' | 's3' | 'github'
-
-interface StaticExportConfig {
-  outputTargets: OutputTarget[]
-  localPath: string
-  s3Bucket: string
-  s3Region: string
-  s3AccessKey: string
-  s3SecretKey: string
-  githubRepo: string
-  githubBranch: string
-  githubToken: string
-  githubAuthorName: string
-  githubAuthorEmail: string
-}
-
-const DEFAULT_CONFIG: StaticExportConfig = {
+const DEFAULT_CONFIG: ExportConfig = {
   outputTargets: ['local'],
   localPath: './out',
   s3Bucket: '',
@@ -68,8 +49,8 @@ const TARGET_ORDER: OutputTarget[] = ['local', 's3', 'github']
 
 export default function StaticExportSettings() {
   // Config state
-  const [config, setConfig] = useState<StaticExportConfig>(DEFAULT_CONFIG)
-  const [savedConfig, setSavedConfig] = useState<StaticExportConfig | null>(null)
+  const [config, setConfig] = useState<ExportConfig>(DEFAULT_CONFIG)
+  const [savedConfig, setSavedConfig] = useState<ExportConfig | null>(null)
   const [isConnected, setIsConnected] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
 
@@ -96,7 +77,7 @@ export default function StaticExportSettings() {
 
       if (result.data && Object.keys(result.data).length > 0) {
         // Merge incoming data over defaults so any new fields stay populated.
-        const loaded: StaticExportConfig = {
+        const loaded: ExportConfig = {
           ...DEFAULT_CONFIG,
           ...result.data,
           outputTargets:
@@ -119,7 +100,7 @@ export default function StaticExportSettings() {
   // Helpers
   // =========================================================================
 
-  const updateConfig = (updates: Partial<StaticExportConfig>) => {
+  const updateConfig = (updates: Partial<ExportConfig>) => {
     setConfig((prev) => ({ ...prev, ...updates }))
   }
 
