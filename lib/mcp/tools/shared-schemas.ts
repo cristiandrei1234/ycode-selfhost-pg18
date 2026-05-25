@@ -35,6 +35,16 @@ export const richTextBlockSchema = z.object({
   component_id: z.string().optional().describe('For component: ID of the component to embed'),
 });
 
+// Accept a bare integer column/row count (e.g. "4") and normalize it to the
+// canonical `repeat(N, 1fr)` form used by the visual editor's LayoutControls.
+// Without this, `grid-cols-[4]` is emitted, which Tailwind treats as invalid CSS.
+const gridTracksSchema = z.preprocess(
+  (value) => (typeof value === 'string' && /^\d+$/.test(value.trim())
+    ? `repeat(${value.trim()}, 1fr)`
+    : value),
+  z.string(),
+).optional();
+
 export const designSchema = z.object({
   layout: z.object({
     isActive: z.boolean().optional(),
@@ -46,8 +56,8 @@ export const designSchema = z.object({
     gap: z.string().optional(),
     columnGap: z.string().optional(),
     rowGap: z.string().optional(),
-    gridTemplateColumns: z.string().optional(),
-    gridTemplateRows: z.string().optional(),
+    gridTemplateColumns: gridTracksSchema,
+    gridTemplateRows: gridTracksSchema,
   }).optional(),
   typography: z.object({
     isActive: z.boolean().optional(),

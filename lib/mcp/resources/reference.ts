@@ -150,7 +150,7 @@ export function registerReferenceResources(server: McpServer) {
               justifyContent: { type: 'enum', values: ['start', 'end', 'center', 'between', 'around', 'evenly'] },
               alignItems: { type: 'enum', values: ['start', 'end', 'center', 'baseline', 'stretch'] },
               gap: { type: 'css_value', examples: ['16px', '1rem'] },
-              gridTemplateColumns: { type: 'string', examples: ['1fr 1fr 1fr', 'repeat(3, 1fr)'] },
+              gridTemplateColumns: { type: 'string', examples: ['4', '1fr 1fr 1fr', 'repeat(3, 1fr)'], description: 'A bare integer is accepted and normalized to repeat(N, 1fr).' },
             },
             typography: {
               fontSize: { type: 'css_value', examples: ['16px', '48px'] },

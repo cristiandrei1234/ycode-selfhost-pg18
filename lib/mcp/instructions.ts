@@ -89,7 +89,7 @@ Each layer's \`design\` object controls its appearance. Use update_layer_design 
 - justifyContent: "start" | "end" | "center" | "between" | "around" | "evenly"
 - alignItems: "start" | "end" | "center" | "baseline" | "stretch"
 - gap: CSS value ("16px", "1rem")
-- gridTemplateColumns: "1fr 1fr 1fr", "repeat(3, 1fr)"
+- gridTemplateColumns: "4" (bare integer count, normalized to repeat(N, 1fr)), "1fr 1fr 1fr", "repeat(3, 1fr)"
 
 **typography** — Text styling
 - fontSize: "16px", "48px", "1.25rem"
