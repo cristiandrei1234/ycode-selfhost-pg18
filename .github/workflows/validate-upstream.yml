@@ -1,0 +1,106 @@
+name: Validate (lean self-host stack)
+
+# Proves an upstream update still works on YOUR lean Postgres-18 stack BEFORE it
+# reaches production. Runs on every PR to the default branch (including the
+# automated upstream-sync PR) and on demand. The gates, in order of importance:
+#   1. migrations apply to plain pg18  ← where a new Supabase-extension assumption surfaces
+#   2. the stack still speaks the Supabase API (smoke test)
+#   3. the app still builds
+# If any gate is red, the sync PR is not mergeable and you fix it in selfhost/.
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      SUPABASE_CONNECTION_URL: postgresql://postgres:[YOUR-PASSWORD]@localhost:5433/postgres
+      SUPABASE_DB_PASSWORD: ycode_pg_pw
+      SUPABASE_URL: http://localhost:8000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Mint fresh stack secrets (no secrets committed)
+        working-directory: selfhost
+        run: |
+          node gen-keys.mjs > keys.json
+          JWT=$(node -p "require('./keys.json').secret")
+          ANON=$(node -p "require('./keys.json').anonKey")
+          SVC=$(node -p "require('./keys.json').serviceKey")
+          cat > .env <<EOF
+          JWT_SECRET=$JWT
+          ANON_KEY=$ANON
+          SERVICE_KEY=$SVC
+          POSTGRES_PASSWORD=ycode_pg_pw
+          EOF
+          # expose the keys to later steps
+          {
+            echo "ANON_KEY=$ANON"
+            echo "SERVICE_KEY=$SVC"
+            echo "SUPABASE_PUBLISHABLE_KEY=$ANON"
+            echo "SUPABASE_SECRET_KEY=$SVC"
+          } >> "$GITHUB_ENV"
+
+      - name: Start lean stack
+        working-directory: selfhost
+        run: docker compose up -d
+
+      - name: Wait for gateway + auth
+        run: |
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/auth/v1/health || true)
+            [ "$code" = "200" ] && echo "auth healthy" && exit 0
+            sleep 2
+          done
+          echo "::error::Auth gateway never became healthy"; exit 1
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run migrations against plain Postgres 18
+        # knexfile.ts imports server-only modules and uses the @/ path alias, so
+        # ts-node needs the react-server export condition + tsconfig-paths. (The
+        # bare `migrate:latest` script also relies on a unix-only inline env var.)
+        env:
+          NODE_NO_WARNINGS: "1"
+          TS_NODE_TRANSPILE_ONLY: "1"
+          NODE_OPTIONS: "--conditions=react-server --require tsconfig-paths/register"
+        run: npx knex migrate:latest --knexfile knexfile.ts
+
+      - name: Reload PostgREST schema cache
+        run: docker kill --signal=SIGUSR1 ycode-rest || true
+
+      - name: Smoke-test the stack (auth + rest + storage through gateway)
+        working-directory: selfhost
+        run: node smoke-test.mjs
+
+      - name: Type-check
+        run: npm run type-check
+
+      - name: Build
+        env:
+          PAGE_AUTH_SECRET: ci-build-secret-not-for-prod
+        run: npm run build
+
+      - name: Stack logs (on failure)
+        if: failure()
+        working-directory: selfhost
+        run: docker compose logs --tail=80
+
+      - name: Tear down
+        if: always()
+        working-directory: selfhost
+        run: docker compose down -v

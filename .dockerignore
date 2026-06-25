@@ -1,0 +1,13 @@
+node_modules
+.next
+.git
+.env
+.env.*
+npm-debug.log*
+.DS_Store
+*.md
+.vscode
+.idea
+coverage
+.playwright-mcp
+ycode-builder-lean-stack.png

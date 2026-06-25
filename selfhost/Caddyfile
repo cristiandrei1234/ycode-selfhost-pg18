@@ -1,0 +1,68 @@
+# Lean path router — the ~15 MB replacement for Supabase's Kong gateway.
+# supabase-js sends everything to one base URL on /auth/v1, /rest/v1, /storage/v1.
+# handle_path strips the prefix before forwarding to each upstream container.
+#
+# It also adds the CORS headers that Kong's CORS plugin adds in stock Supabase —
+# without them the browser auth client fails every cross-origin call with
+# "Failed to fetch".
+
+{
+	admin off
+	auto_https off
+}
+
+:8000 {
+	# `route` preserves directive order: CORS headers first (deferred so they
+	# attach to proxied responses too), then short-circuit OPTIONS preflight,
+	# then the path routing.
+	route {
+		header {
+			Access-Control-Allow-Origin "{http.request.header.Origin}"
+			Access-Control-Allow-Credentials "true"
+			Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+			Access-Control-Allow-Headers "apikey, authorization, content-type, x-client-info, x-supabase-api-version, prefer, range, accept-profile, content-profile"
+			Access-Control-Expose-Headers "content-range, content-encoding, x-supabase-api-version"
+			defer
+		}
+
+		@options method OPTIONS
+		respond @options 204
+
+		handle_path /auth/v1/* {
+			reverse_proxy auth:9999
+		}
+
+		handle_path /rest/v1/* {
+			reverse_proxy rest:3000
+		}
+
+		handle_path /storage/v1/* {
+			reverse_proxy storage:5000
+		}
+
+		# Realtime REST API: /realtime/v1/api/* -> realtime /api/*  (must precede the ws route)
+		handle_path /realtime/v1/api/* {
+			rewrite * /api{uri}
+			reverse_proxy realtime:4000 {
+				header_up Host realtime-dev.localhost
+			}
+		}
+
+		# Realtime websocket: /realtime/v1/* -> realtime /socket/*
+		# Host's first label (realtime-dev) is how Realtime resolves the tenant.
+		handle_path /realtime/v1/* {
+			rewrite * /socket{uri}
+			reverse_proxy realtime:4000 {
+				header_up Host realtime-dev.localhost
+			}
+		}
+
+		handle /health {
+			respond "gateway-ok" 200
+		}
+
+		handle {
+			respond "Ycode lean gateway" 200
+		}
+	}
+}

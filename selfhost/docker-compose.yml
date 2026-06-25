@@ -1,0 +1,231 @@
+# Lean Supabase-compatible stack for self-hosting Ycode on plain Postgres 18.
+# Replaces the ~10-container Supabase bundle with: db + auth + rest + storage + a
+# tiny Caddy router (and Mailpit to catch invite/reset emails locally).
+#
+#   gateway (Caddy)  -> http://localhost:8000   == SUPABASE_URL for Ycode
+#     /auth/v1/*     -> auth     (GoTrue)
+#     /rest/v1/*     -> rest      (PostgREST)
+#     /storage/v1/*  -> storage   (Storage API)
+#   db               -> localhost:5433          == Ycode knex direct connection
+
+name: ycode-lean
+
+services:
+  db:
+    image: postgres:18
+    container_name: ycode-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+    command: ["postgres", "-c", "wal_level=logical"]
+    volumes:
+      # postgres:18 moved PGDATA to /var/lib/postgresql/18/docker; the image's
+      # VOLUME is /var/lib/postgresql, so persist that path (not /data).
+      - db-data:/var/lib/postgresql
+      - ./init-db:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # One-shot, idempotent: ensures the Supabase-preinstalled extensions exist on
+  # EVERY startup (init-db only runs on a fresh volume). Keeps an existing DB
+  # compatible after upstream adds a migration that assumes a stock extension.
+  db-bootstrap:
+    image: postgres:18
+    container_name: ycode-db-bootstrap
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./compat:/compat:ro
+    entrypoint: ["bash", "-c", "psql -h db -U postgres -d postgres -v ON_ERROR_STOP=1 -f /compat/extensions.sql && echo '[db-bootstrap] compat extensions ensured'"]
+
+  auth:
+    image: supabase/gotrue:v2.191.0
+    container_name: ycode-auth
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: ${PUBLIC_API_URL:-http://localhost:8000}/auth/v1
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:auth_admin_pw@db:5432/postgres?search_path=auth
+      GOTRUE_SITE_URL: ${SITE_URL:-http://localhost:3002}
+      GOTRUE_URI_ALLOW_LIST: ${URI_ALLOW_LIST:-*}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+      GOTRUE_JWT_EXP: "3600"
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP:-false}
+      # Local: AUTOCONFIRM=true skips email confirmation. Production: set to false.
+      GOTRUE_MAILER_AUTOCONFIRM: ${MAILER_AUTOCONFIRM:-true}
+      GOTRUE_SMTP_HOST: ${SMTP_HOST:-mailpit}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT:-1025}
+      GOTRUE_SMTP_USER: ${SMTP_USER:-dev}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS:-dev}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL:-admin@ycode.local}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME:-Ycode}
+      GOTRUE_MAILER_URLPATHS_INVITE: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_RECOVERY: /auth/v1/verify
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: /auth/v1/verify
+    ports:
+      - "9999:9999"
+
+  rest:
+    image: postgrest/postgrest:v12.2.12
+    container_name: ycode-rest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:authenticator_pw@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+    ports:
+      - "3001:3000"
+
+  storage:
+    image: supabase/storage-api:v1.61.0
+    container_name: ycode-storage
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_KEY}
+      AUTH_JWT_SECRET: ${JWT_SECRET}
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      POSTGREST_URL: http://rest:3000
+      DATABASE_URL: postgres://supabase_storage_admin:storage_admin_pw@db:5432/postgres
+      DB_INSTALL_ROLES: "false"
+      FILE_SIZE_LIMIT: "52428800"
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      REGION: stub
+      GLOBAL_S3_BUCKET: stub
+      ENABLE_IMAGE_TRANSFORMATION: "false"
+    volumes:
+      - storage-data:/var/lib/storage
+    ports:
+      - "5001:5000"
+
+  realtime:
+    image: supabase/realtime:v2.111.7
+    container_name: ycode-realtime
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: "4000"
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: postgres
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY}
+      API_JWT_SECRET: ${JWT_SECRET}
+      METRICS_JWT_SECRET: ${JWT_SECRET}
+      SECRET_KEY_BASE: ${REALTIME_SECRET_KEY_BASE}
+      ERL_AFLAGS: "-proto_dist inet_tcp"
+      DNS_CLUSTER_QUERY: ""
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "false"
+      RUN_JANITOR: "true"
+    # No host port — the gateway reaches it in-network as realtime:4000.
+    expose:
+      - "4000"
+
+  # One-shot: registers the "realtime-dev" tenant once Realtime is up (idempotent).
+  realtime-bootstrap:
+    image: curlimages/curl:latest
+    container_name: ycode-realtime-bootstrap
+    restart: "no"
+    depends_on:
+      - realtime
+    environment:
+      SERVICE_KEY: ${SERVICE_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./compat:/compat:ro
+    entrypoint: ["sh", "/compat/realtime-bootstrap.sh"]
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: ycode-mailpit
+    restart: unless-stopped
+    ports:
+      - "8025:8025"
+      - "1025:1025"
+
+  gateway:
+    image: caddy:2.11.4-alpine
+    container_name: ycode-gateway
+    restart: unless-stopped
+    depends_on:
+      - auth
+      - rest
+      - storage
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "8000:8000"
+
+  # The Ycode app itself, containerised. Opt-in: `docker compose --profile app up -d`.
+  # Applies migrations on startup, then serves Next.js on :3002.
+  # NOTE: SUPABASE_URL must be reachable from BOTH the browser and this container,
+  # so on a server use your public domain (https://api.example.com). Locally the
+  # split-horizon localhost makes server-side calls fail — use `npm run dev` for
+  # local work and this profile for server deployment.
+  app:
+    build:
+      context: ../ycode
+      dockerfile: Dockerfile
+    image: ycode-app:latest
+    container_name: ycode-app
+    profiles: ["app"]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    environment:
+      SUPABASE_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+      SUPABASE_PUBLISHABLE_KEY: ${ANON_KEY}
+      SUPABASE_SECRET_KEY: ${SERVICE_KEY}
+      # Direct DB connection over the internal network ([YOUR-PASSWORD] is
+      # substituted by Ycode with SUPABASE_DB_PASSWORD).
+      SUPABASE_CONNECTION_URL: postgresql://postgres:[YOUR-PASSWORD]@db:5432/postgres
+      SUPABASE_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      PAGE_AUTH_SECRET: ${PAGE_AUTH_SECRET:-please-change-this-page-auth-secret}
+    ports:
+      - "3002:3002"
+
+volumes:
+  db-data:
+  storage-data:

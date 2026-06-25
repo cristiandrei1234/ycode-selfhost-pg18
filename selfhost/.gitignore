@@ -1,0 +1,4 @@
+# Secrets — never commit. (.env.example IS tracked, re-included below.)
+.env
+keys.json
+!.env.example
