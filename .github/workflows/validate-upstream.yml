@@ -87,10 +87,10 @@ jobs:
         working-directory: selfhost
         run: node smoke-test.mjs
 
-      - name: Type-check
-        run: npm run type-check
-
-      - name: Build
+      # `next build` type-checks the project AND generates next-env.d.ts (which
+      # the standalone `tsc --noEmit` needs for *.svg/*.png module types), so we
+      # rely on it instead of a separate type-check step.
+      - name: Build (also type-checks)
         env:
           PAGE_AUTH_SECRET: ci-build-secret-not-for-prod
         run: npm run build
