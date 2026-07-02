@@ -191,8 +191,8 @@ function formatMeasurementClass(
     return `${prefix}-[${value}]`;
   }
 
-  // For values starting with a digit but not caught above
-  if (value.match(/^\d/)) {
+  // For values starting with a digit or leading decimal point (e.g. ".875rem")
+  if (value.match(/^\.?\d/)) {
     return `${prefix}-[${value}]`;
   }
 
@@ -280,7 +280,7 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   minHeight: /^min-h-(\[.+\]|\d+|px|full|screen|min|max|fit)$/,
   maxWidth: /^max-w-(\[.+\]|none|xs|sm|md|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|full|min|max|fit|prose|screen-sm|screen-md|screen-lg|screen-xl|screen-2xl)$/,
   maxHeight: /^max-h-(\[.+\]|\d+|px|full|screen|min|max|fit)$/,
-  overflow: /^overflow-(visible|hidden|clip|scroll|auto|x-visible|x-hidden|x-clip|x-scroll|x-auto|y-visible|y-hidden|y-clip|y-scroll|y-auto)$/,
+  overflow: /^(truncate|overflow-(visible|hidden|clip|scroll|auto|x-visible|x-hidden|x-clip|x-scroll|x-auto|y-visible|y-hidden|y-clip|y-scroll|y-auto))$/,
   aspectRatio: /^aspect-(\[.+\]|auto|square|video)$/,
   objectFit: /^object-(contain|cover|fill|none|scale-down)$/,
   objectPosition: /^object-(left-top|right-top|left-bottom|right-bottom|top|bottom|left|right|center|\[.+\])$/,
@@ -739,10 +739,10 @@ export function propertyToClass(
         // Google/custom fonts: replace spaces with underscores for Tailwind arbitrary values
         return `font-[${value.replace(/\s+/g, '_')}]`;
       case 'lineHeight':
-        return value.match(/^\d/) ? `leading-[${value}]` : `leading-${value}`;
+        return value.match(/^\.?\d/) ? `leading-[${value}]` : `leading-${value}`;
       case 'letterSpacing':
-        // Check if value starts with digit/minus and doesn't already have a unit
-        if (value.match(/^-?\d/)) {
+        // Check if value starts with digit/minus/decimal and doesn't already have a unit
+        if (value.match(/^-?\.?\d/)) {
           // Check if value already has a unit (ends with letters or %)
           const hasUnit = /[a-z%]$/i.test(value);
           return hasUnit ? `tracking-[${value}]` : `tracking-[${value}em]`;
@@ -865,6 +865,7 @@ export function propertyToClass(
 
     // Overflow
     if (property === 'overflow') {
+      if (value === 'ellipsis') return 'truncate'; // overflow-hidden + text-ellipsis + whitespace-nowrap
       return `overflow-${value}`; // overflow-visible, overflow-hidden, overflow-scroll, overflow-auto
     }
 
@@ -1700,7 +1701,9 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     }
 
     // Overflow
-    if (cls.startsWith('overflow-')) {
+    if (cls === 'truncate') {
+      design.sizing!.overflow = 'ellipsis';
+    } else if (cls.startsWith('overflow-')) {
       const match = cls.match(/^overflow-(visible|hidden|clip|scroll|auto|x-visible|x-hidden|x-clip|x-scroll|x-auto|y-visible|y-hidden|y-clip|y-scroll|y-auto)$/);
       if (match) {
         design.sizing!.overflow = match[1];

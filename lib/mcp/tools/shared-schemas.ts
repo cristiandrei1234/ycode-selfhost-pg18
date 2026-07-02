@@ -99,7 +99,7 @@ export const designSchema = z.object({
     minHeight: z.string().optional(),
     maxWidth: z.string().optional(),
     maxHeight: z.string().optional(),
-    overflow: z.string().optional().describe('visible | hidden | scroll | auto'),
+    overflow: z.string().optional().describe('visible | hidden | scroll | auto | ellipsis (single-line text-ellipsis)'),
     aspectRatio: z.string().nullable().optional(),
     objectFit: z.string().nullable().optional(),
     objectPosition: z.string().nullable().optional().describe('top | bottom | left | right | center | left-top | right-top | left-bottom | right-bottom'),

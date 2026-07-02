@@ -44,7 +44,7 @@ import { generateInitialAnimationCSS } from '@/lib/animation-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS } from '@/lib/map-utils';
 import { getMapboxAccessToken, getGoogleMapsEmbedApiKey } from '@/lib/map-server';
 import { getAssetsByIds } from '@/lib/repositories/assetRepository';
-import { isVirtualAssetField, findDisplayField, hasDynamicDateRule, isDynamicDateCondition, buildGlobalsMetaMap, buildGlobalsValueMap, mergeGlobalsIntoFieldData, type GlobalFieldMeta } from '@/lib/collection-field-utils';
+import { isVirtualAssetField, findDisplayField, hasDynamicDateRule, isDynamicDateCondition, buildGlobalsMetaMap, buildGlobalsValueMap, mergeGlobalsIntoFieldData, MULTI_ASSET_COLLECTION_ID, type GlobalFieldMeta } from '@/lib/collection-field-utils';
 import { getDefaultFormatId, isFormatValidForFieldType } from '@/lib/variable-format-utils';
 import type { DynamicVisibilityCondition, FieldVariable, AssetVariable, DynamicTextVariable, DynamicRichTextVariable, LinkSettings } from '@/types';
 import type { DesignColorVariable } from '@/types';
@@ -92,6 +92,37 @@ function createResolvedAssetVariable(
   return isVirtualAssetField(fieldId)
     ? createDynamicTextVariable(resolvedValue)
     : createAssetVariable(resolvedValue);
+}
+
+/** Build a minimal collection item wrapper around raw field values for inline resolution. */
+function buildMockCollectionItem(values: Record<string, string>): CollectionItemWithValues {
+  return {
+    id: 'temp',
+    collection_id: 'temp',
+    created_at: '',
+    updated_at: '',
+    deleted_at: null,
+    manual_order: 0,
+    is_published: true,
+    is_publishable: true,
+    content_hash: null,
+    values,
+  };
+}
+
+/**
+ * Resolve inline variables inside an image alt's dynamic_text content.
+ * Returns the original alt (or an empty alt) when there's nothing to resolve.
+ */
+function resolveImageAltVariable(
+  altVar: DynamicTextVariable | undefined,
+  resolveContent: (content: string) => string
+): DynamicTextVariable {
+  const content = altVar?.data?.content;
+  if (altVar?.type === 'dynamic_text' && typeof content === 'string' && content.includes('<ycode-inline-variable>')) {
+    return { type: 'dynamic_text', data: { content: resolveContent(content) } };
+  }
+  return altVar || createDynamicTextVariable('');
 }
 
 export interface PageData {
@@ -273,6 +304,9 @@ interface TranslationLoadContext {
   isPublished: boolean;
   tenantId?: string;
   loadedItemIds: Set<string>;
+  // In-flight loads keyed by item id. Concurrent resolutions of the same item
+  // await the same fetch instead of skipping it before rows are merged.
+  inFlight: Map<string, Promise<void>>;
 }
 
 const translationLoadContexts = new WeakMap<object, TranslationLoadContext>();
@@ -289,6 +323,7 @@ function registerTranslationContext(
     isPublished,
     tenantId,
     loadedItemIds: new Set(),
+    inFlight: new Map(),
   });
 }
 
@@ -309,22 +344,46 @@ export async function ensureCmsTranslations(
   const ctx = translationLoadContexts.get(translations);
   if (!ctx) return;
 
-  const missing: string[] = [];
+  // Partition requested ids: those needing a fresh fetch vs. those already
+  // being fetched by a concurrent caller (whose promise we must await).
+  const toFetch: string[] = [];
+  const waits: Promise<void>[] = [];
   for (const id of itemIds) {
-    if (id && !ctx.loadedItemIds.has(id)) {
-      ctx.loadedItemIds.add(id);
-      missing.push(id);
+    if (!id || ctx.loadedItemIds.has(id)) continue;
+    const existing = ctx.inFlight.get(id);
+    if (existing) {
+      waits.push(existing);
+    } else {
+      toFetch.push(id);
     }
   }
-  if (missing.length === 0) return;
 
-  try {
-    const rows = await getCmsTranslationsForItems(ctx.localeId, ctx.isPublished, missing, ctx.tenantId);
-    for (const row of rows) {
-      translations[getTranslatableKey(row)] = row;
+  if (toFetch.length > 0) {
+    // Mark loaded ids only AFTER rows are merged, so concurrent callers don't
+    // run applyCmsTranslations against a map that hasn't received the rows yet.
+    const loadPromise = (async () => {
+      try {
+        const rows = await getCmsTranslationsForItems(ctx.localeId, ctx.isPublished, toFetch, ctx.tenantId);
+        for (const row of rows) {
+          translations[getTranslatableKey(row)] = row;
+        }
+      } catch (error) {
+        console.error('Failed to load scoped CMS translations:', error);
+      } finally {
+        for (const id of toFetch) {
+          ctx.loadedItemIds.add(id);
+          ctx.inFlight.delete(id);
+        }
+      }
+    })();
+    for (const id of toFetch) {
+      ctx.inFlight.set(id, loadPromise);
     }
-  } catch (error) {
-    console.error('Failed to load scoped CMS translations:', error);
+    waits.push(loadPromise);
+  }
+
+  if (waits.length > 0) {
+    await Promise.all(waits);
   }
 }
 
@@ -1317,19 +1376,7 @@ async function injectCollectionData(
   else if (textVariable && textVariable.type === 'dynamic_text') {
     const textContent = textVariable.data.content;
     if (textContent.includes('<ycode-inline-variable>')) {
-      const mockItem: CollectionItemWithValues = {
-        id: 'temp',
-        collection_id: 'temp',
-        created_at: '',
-        updated_at: '',
-        deleted_at: null,
-        manual_order: 0,
-        is_published: true,
-        is_publishable: true,
-        content_hash: null,
-        values: enhancedValues,
-      };
-      const resolved = resolveInlineVariablesWithRelationships(textContent, mockItem, timezone, rawItemValues);
+      const resolved = resolveInlineVariablesWithRelationships(textContent, buildMockCollectionItem(enhancedValues), timezone, rawItemValues);
 
       resolvedVars.text = {
         type: 'dynamic_text',
@@ -1338,13 +1385,24 @@ async function injectCollectionData(
     }
   }
 
-  // Image src field binding (variables structure)
+  // Image src field binding (variables structure). The alt may carry inline
+  // variables (e.g. multi-asset __asset_filename), so resolve it in both the
+  // field-bound and static-src cases.
+  const resolveImageAlt = (alt: DynamicTextVariable | undefined) =>
+    resolveImageAltVariable(alt, (content) =>
+      resolveInlineVariablesWithRelationships(content, buildMockCollectionItem(enhancedValues), timezone, rawItemValues));
+
   const imageSrc = layer.variables?.image?.src;
   if (imageSrc && isFieldVariable(imageSrc) && imageSrc.data.field_id) {
     const resolvedValue = resolveFieldValueWithRelationships(imageSrc, enhancedValues, layerDataMap);
     resolvedVars.image = {
       src: createResolvedAssetVariable(imageSrc.data.field_id, resolvedValue, imageSrc),
-      alt: layer.variables?.image?.alt || createDynamicTextVariable(''),
+      alt: resolveImageAlt(layer.variables?.image?.alt),
+    };
+  } else if (layer.variables?.image) {
+    resolvedVars.image = {
+      ...layer.variables.image,
+      alt: resolveImageAlt(layer.variables.image.alt),
     };
   }
 
@@ -2058,7 +2116,11 @@ function collectBoundFieldIds(layers: Layer[]): { fieldIds: Set<string>; fieldPa
 function collectAllCollectionIds(layers: Layer[]): Set<string> {
   const ids = new Set<string>();
   const scan = (layer: Layer) => {
-    if (layer.variables?.collection?.id) ids.add(layer.variables.collection.id);
+    // Skip the virtual multi-asset collection id — it's not a real DB collection,
+    // and querying it (invalid UUID) errors the whole batch item fetch, which
+    // would leave every real collection on the page with no items.
+    const collectionId = layer.variables?.collection?.id;
+    if (collectionId && collectionId !== MULTI_ASSET_COLLECTION_ID) ids.add(collectionId);
     if (layer.settings?.optionsSource?.collectionId) ids.add(layer.settings.optionsSource.collectionId);
     if (layer.children) layer.children.forEach(scan);
   };
@@ -2428,19 +2490,60 @@ export async function resolveCollectionLayers(
           // Handle multi-asset collections - build virtual items from asset IDs
           if (sourceFieldType === 'multi_asset' && sourceFieldId && itemValues) {
             const fieldValue = itemValues[sourceFieldId];
-            const assetIds = parseMultiAssetFieldValue(fieldValue);
+            let assetIds = parseMultiAssetFieldValue(fieldValue);
 
-            if (assetIds.length === 0) {
+            // Pagination mirrors the regular collection branch below: the asset
+            // ID array is the full result set, so totalItems/maxTotal/page
+            // slicing all operate on it directly.
+            const multiAssetPagination = collectionVariable.pagination;
+            const isMultiAssetPaginated = multiAssetPagination?.enabled
+              && (multiAssetPagination?.mode === 'pages' || multiAssetPagination?.mode === 'load_more');
+
+            let multiAssetLimit: number | undefined;
+            let multiAssetOffset: number | undefined;
+            let multiAssetCurrentPage = 1;
+            if (isMultiAssetPaginated) {
+              const itemsPerPage = multiAssetPagination!.items_per_page || 10;
+              multiAssetCurrentPage = paginationContext?.pageNumbers?.[layer.id]
+                ?? paginationContext?.defaultPage
+                ?? 1;
+              multiAssetLimit = itemsPerPage;
+              multiAssetOffset = (multiAssetCurrentPage - 1) * itemsPerPage;
+            } else {
+              multiAssetLimit = collectionVariable.limit;
+              multiAssetOffset = collectionVariable.offset;
+            }
+
+            // When paginated, `limit` is a hard cap on the total (matches the
+            // regular collection branch); otherwise it acts as a per-page limit.
+            const multiAssetMaxTotal = isMultiAssetPaginated
+              && typeof collectionVariable.limit === 'number' && collectionVariable.limit > 0
+              ? collectionVariable.limit
+              : undefined;
+            if (multiAssetMaxTotal != null && assetIds.length > multiAssetMaxTotal) {
+              assetIds = assetIds.slice(0, multiAssetMaxTotal);
+            }
+
+            const multiAssetTotal = assetIds.length;
+
+            if (multiAssetTotal === 0 && !isMultiAssetPaginated) {
               // No assets - return layer without children
               return { ...layer, children: [] };
             }
 
-            // Fetch all assets at once (returns Record<string, Asset>)
-            const assetsById = await getAssetsByIds(assetIds, isPublished);
+            // Slice to the current page (mirrors DB pagination).
+            let pageAssetIds = assetIds;
+            if (multiAssetLimit || multiAssetOffset) {
+              const start = multiAssetOffset || 0;
+              pageAssetIds = assetIds.slice(start, multiAssetLimit ? start + multiAssetLimit : undefined);
+            }
+
+            // Fetch only the assets shown on this page (returns Record<string, Asset>)
+            const assetsById = await getAssetsByIds(pageAssetIds, isPublished);
 
             // Clone the layer for each asset (like regular collections)
             const clonedLayers: Layer[] = await Promise.all(
-              assetIds.map(async (assetId) => {
+              pageAssetIds.map(async (assetId) => {
                 const asset = assetsById[assetId];
                 if (!asset) return null;
 
@@ -2507,6 +2610,26 @@ export async function resolveCollectionLayers(
               })
             ).then(results => results.filter((item): item is Layer => item !== null));
 
+            // Build pagination metadata so sibling pagination layers ("Total
+            // items", "Page X of Y", Prev/Next) resolve against the asset count.
+            let multiAssetPaginationMeta: CollectionPaginationMeta | undefined;
+            if (isMultiAssetPaginated && multiAssetPagination) {
+              const itemsPerPage = multiAssetPagination.items_per_page || 10;
+              multiAssetPaginationMeta = {
+                currentPage: multiAssetCurrentPage,
+                totalPages: Math.ceil(multiAssetTotal / itemsPerPage),
+                totalItems: multiAssetTotal,
+                itemsPerPage,
+                layerId: layer.id,
+                collectionId: collectionVariable.id,
+                mode: multiAssetPagination.mode,
+                itemIds: assetIds,
+                isPublished,
+                // No sort: multi-asset order is the image order in the field.
+                maxTotal: multiAssetMaxTotal,
+              };
+            }
+
             // Return a fragment layer containing all cloned items
             // _fragment is a special marker that LayerRenderer and layerToHtml handle
             return {
@@ -2521,6 +2644,7 @@ export async function resolveCollectionLayers(
                 ...layer.variables,
                 collection: undefined,
               },
+              _paginationMeta: multiAssetPaginationMeta,
             };
           }
 
@@ -3800,19 +3924,7 @@ async function injectCollectionDataForHtml(
   else if (textVariable && textVariable.type === 'dynamic_text') {
     const textContent = textVariable.data.content;
     if (textContent.includes('<ycode-inline-variable>')) {
-      const mockItem: CollectionItemWithValues = {
-        id: 'temp',
-        collection_id: 'temp',
-        created_at: '',
-        updated_at: '',
-        deleted_at: null,
-        manual_order: 0,
-        is_published: true,
-        is_publishable: true,
-        content_hash: null,
-        values: enhancedValues,
-      };
-      const resolved = resolveInlineVariables(textContent, mockItem, timezone, rawItemValues);
+      const resolved = resolveInlineVariables(textContent, buildMockCollectionItem(enhancedValues), timezone, rawItemValues);
       resolvedVars.text = {
         type: 'dynamic_text',
         data: { content: resolved },
@@ -3830,13 +3942,24 @@ async function injectCollectionDataForHtml(
     return enhancedValues[fullPath] || '';
   };
 
-  // Image src field binding (variables structure)
+  // Image src field binding (variables structure). The alt may carry inline
+  // variables (e.g. multi-asset __asset_filename), so resolve it in both the
+  // field-bound and static-src cases.
+  const resolveImageAlt = (alt: DynamicTextVariable | undefined) =>
+    resolveImageAltVariable(alt, (content) =>
+      resolveInlineVariables(content, buildMockCollectionItem(enhancedValues), timezone, rawItemValues));
+
   const imageSrc = layer.variables?.image?.src;
   if (imageSrc && isFieldVariable(imageSrc) && imageSrc.data.field_id) {
     const resolvedValue = resolveFieldPath(imageSrc);
     resolvedVars.image = {
       src: createResolvedAssetVariable(imageSrc.data.field_id, resolvedValue, imageSrc),
-      alt: layer.variables?.image?.alt || createDynamicTextVariable(''),
+      alt: resolveImageAlt(layer.variables?.image?.alt),
+    };
+  } else if (layer.variables?.image) {
+    resolvedVars.image = {
+      ...layer.variables.image,
+      alt: resolveImageAlt(layer.variables.image.alt),
     };
   }
 

@@ -645,6 +645,7 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
                 <SelectItem value="visible">Visible</SelectItem>
                 <SelectItem value="hidden">Hidden</SelectItem>
                 <SelectItem value="scroll">Scroll</SelectItem>
+                <SelectItem value="ellipsis">Ellipsis</SelectItem>
                 <SelectItem value="auto">Auto</SelectItem>
               </SelectGroup>
             </SelectContent>
