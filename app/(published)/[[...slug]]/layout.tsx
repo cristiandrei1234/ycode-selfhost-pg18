@@ -11,8 +11,10 @@ interface PublishedLayoutProps {
 
 /**
  * Root layout for published pages. Lives inside the optional catch-all so it
- * receives the URL slug at static-generation time and can set `<html lang>`
- * in the first HTML byte — required for SEO / a11y (no after-paint script).
+ * receives the URL slug at static-generation time and can set `<html lang>`,
+ * `dir`, and `<body class>` in the first HTML byte — required for SEO / a11y
+ * (no after-paint script). Cloud ISR stays intact because this does not call
+ * headers().
  */
 export default async function PublishedLayout({
   children,
