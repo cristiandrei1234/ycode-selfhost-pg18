@@ -13,7 +13,7 @@ import type { UseLiveComponentUpdatesReturn } from '@/hooks/use-live-component-u
 import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById, applyCustomAttributes, containsLayerId } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
 import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
-import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
+import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP, SLIDER_BUTTON_ARIA_LABELS, isSliderChromeButton } from '@/lib/slider-constants';
 import { getSliderPresizeVars } from '@/lib/slider-utils';
 import { useCanvasSlider } from '@/hooks/use-canvas-slider';
 import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
@@ -143,6 +143,8 @@ interface LayerRendererProps {
    * over the rest of the page. Computed server-side by PageRenderer.
    */
   lcpCandidateLayerId?: string | null;
+  /** Immediate parent layer name — used to coerce slider nav children to span. */
+  parentLayerName?: string;
 }
 
 const LayerRenderer: React.FC<LayerRendererProps> = ({
@@ -194,6 +196,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
   componentRootContextMenu,
   onComponentEdit,
   lcpCandidateLayerId,
+  parentLayerName,
 }) => {
   const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState<string>('');
@@ -346,6 +349,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
         componentRootContextMenu={componentRootContextMenu}
         onComponentEdit={onComponentEdit}
         lcpCandidateLayerId={lcpCandidateLayerId}
+        parentLayerName={parentLayerName}
       />
     );
   };
@@ -414,6 +418,7 @@ const LayerItemImpl: React.FC<{
   componentRootContextMenu?: boolean;
   onComponentEdit?: (componentId: string, instanceLayerId: string) => void;
   lcpCandidateLayerId?: string | null;
+  parentLayerName?: string;
 }> = ({
   layer,
   isEditMode,
@@ -469,6 +474,7 @@ const LayerItemImpl: React.FC<{
   serverSettings,
   componentRootContextMenu,
   lcpCandidateLayerId,
+  parentLayerName,
 }) => {
   // Subscribe to selection state from the store for reactive updates without
   // forcing the entire LayerRenderer tree to re-render when selection changes
@@ -651,7 +657,7 @@ const LayerItemImpl: React.FC<{
     [layer.id, sharedRendererProps, isEditMode, currentLocale, translations, pageId]
   );
 
-  let htmlTag = getLayerHtmlTag(layer);
+  let htmlTag = getLayerHtmlTag(layer, parentLayerName);
 
   const isSimpleTextLayer = isTextContentLayer(layer);
 
@@ -1237,8 +1243,8 @@ const LayerItemImpl: React.FC<{
   // (e.g. legacy data), extract its text instead of stringifying to "[object Object]".
   const rawImageAltContent = getDynamicTextContent(effectiveImageSettings?.alt) as unknown;
   const rawImageAlt = typeof rawImageAltContent === 'object' && rawImageAltContent !== null
-    ? (extractPlainTextFromTiptap(rawImageAltContent) || 'Image')
-    : String(rawImageAltContent || 'Image');
+    ? (extractPlainTextFromTiptap(rawImageAltContent) || '')
+    : String(rawImageAltContent || '');
   const originalImageAlt = rawImageAlt.includes('<ycode-inline-variable>')
     ? resolveInlineVariablesFromData(rawImageAlt, collectionLayerData, pageCollectionItemData ?? undefined, timezone, effectiveLayerDataMap)
     : rawImageAlt;
@@ -1248,7 +1254,7 @@ const LayerItemImpl: React.FC<{
     translations,
     pageId,
     layer._masterComponentId
-  ) || 'Image';
+  ) || '';
   const imageAlt = translatedImageAlt;
 
   // Resolve audio source - check for linked component variable first
@@ -2258,6 +2264,12 @@ const LayerItemImpl: React.FC<{
       if (SWIPER_DATA_ATTR_MAP[layer.name]) {
         elementProps[SWIPER_DATA_ATTR_MAP[layer.name]] = '';
       }
+      if (isSliderChromeButton(layer.name)) {
+        elementProps.type = 'button';
+        if (!elementProps['aria-label']) {
+          elementProps['aria-label'] = SLIDER_BUTTON_ARIA_LABELS[layer.name];
+        }
+      }
 
       // Lightbox data attributes (LightboxInitializer)
       if (layer.name === 'lightbox' && layer.settings?.lightbox) {
@@ -2662,7 +2674,7 @@ const LayerItemImpl: React.FC<{
     }
 
     // Handle button inside form - set type="submit" only when not in edit mode (preview and published)
-    if (htmlTag === 'button' && isInsideForm && !isEditMode) {
+    if (htmlTag === 'button' && isInsideForm && !isEditMode && !isSliderChromeButton(layer.name)) {
       // Only override if type is not explicitly set or is 'button'
       if (!normalizedAttributes.type || normalizedAttributes.type === 'button') {
         elementProps.type = 'submit';
@@ -2861,6 +2873,9 @@ const LayerItemImpl: React.FC<{
       // instead of collapsing. Inert when both dimensions are explicitly set.
       const iconAspectRatio = getSvgAspectRatioStyle(iconHtml);
       const iconElementStyle = (typeof elementProps.style === 'object' && elementProps.style) || undefined;
+      if (elementProps['aria-hidden'] == null && elementProps['aria-label'] == null) {
+        elementProps['aria-hidden'] = true;
+      }
 
       return (
         <Tag
@@ -2888,7 +2903,8 @@ const LayerItemImpl: React.FC<{
             display: 'block',
             ...mergedStyle,
           }}
-          title={`Code Embed ${layer.id}`}
+          title={layer.customName || 'Code embed'}
+          loading="lazy"
         />
       );
     }
@@ -2949,7 +2965,8 @@ const LayerItemImpl: React.FC<{
               border: 'none',
               display: 'block',
             }}
-            title="Map"
+            title={layer.customName || 'Map'}
+            loading="lazy"
             suppressHydrationWarning
           />
         </div>
@@ -2988,7 +3005,8 @@ const LayerItemImpl: React.FC<{
             className: fullClassName,
             style: mergedStyle,
             src: embedUrl,
-            frameBorder: '0',
+            title: layer.customName || 'YouTube video',
+            loading: 'lazy',
             allow: 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture',
             allowFullScreen: true,
           };
@@ -3209,6 +3227,7 @@ const LayerItemImpl: React.FC<{
               isSlideChild={layer.name === 'slides'}
               serverSettings={serverSettings}
               lcpCandidateLayerId={lcpCandidateLayerId}
+              parentLayerName={layer.name}
             />
           )}
         </>
@@ -3541,6 +3560,7 @@ const LayerItemImpl: React.FC<{
                     serverSettings={serverSettings}
                     onComponentEdit={onComponentEdit}
                     lcpCandidateLayerId={lcpCandidateLayerId}
+                    parentLayerName={layer.name}
                   />
                 )}
               </Tag>
@@ -3612,6 +3632,7 @@ const LayerItemImpl: React.FC<{
               serverSettings={serverSettings}
               onComponentEdit={onComponentEdit}
               lcpCandidateLayerId={lcpCandidateLayerId}
+              parentLayerName={layer.name}
             />
           )}
 
@@ -3689,6 +3710,7 @@ const LayerItemImpl: React.FC<{
             serverSettings={serverSettings}
             onComponentEdit={onComponentEdit}
             lcpCandidateLayerId={lcpCandidateLayerId}
+            parentLayerName={layer.name}
           />
         )}
       </Tag>

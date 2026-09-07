@@ -31,7 +31,7 @@ export interface PaginationContext {
 import { resolveRefCollectionItemId, generateLinkHref, isLinkAtCollectionBoundary, isLinkToCurrentPage, parseCollectionLinkValue, extractCrossCollectionItemIds } from '@/lib/link-utils';
 import type { LinkResolutionContext } from '@/lib/link-utils';
 import { getLinkSettingsFromMark } from '@/lib/tiptap-extensions/rich-text-link';
-import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
+import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP, SLIDER_BUTTON_ARIA_LABELS, isSliderChromeButton } from '@/lib/slider-constants';
 import { resolveInlineVariables, resolveInlineVariablesFromData } from '@/lib/inline-variables';
 import { buildPaginationNumbers, getPaginationLayerKind, hasPaginationVariables, paginationTextVariableToTemplate, resolvePaginationTextVariable } from '@/lib/pagination-text-utils';
 import { formatFieldValue, resolveFieldFromSources } from '@/lib/cms-variables-utils';
@@ -4606,6 +4606,8 @@ export interface PageLinkContext {
    * no hydration, so an iframe with no `height` clips the user's content.
    */
   isStaticExport?: boolean;
+  /** Immediate parent layer name — used to coerce slider nav children to span. */
+  parentLayerName?: string;
 }
 
 /** Build an `assetMap`-backed `getAsset` callback compatible with `generateLinkHref`. */
@@ -4680,7 +4682,7 @@ export function layerToHtml(
     });
 
   // Get the HTML tag
-  let tag = getLayerHtmlTag(layer);
+  let tag = getLayerHtmlTag(layer, pageLinkContext?.parentLayerName);
 
   // Buttons with link settings render as <a> directly instead of being
   // wrapped in <a><button></button></a> which is invalid HTML
@@ -4751,6 +4753,13 @@ export function layerToHtml(
   // Add data attributes for slider nav/pagination elements (used by SliderInitializer)
   if (SWIPER_DATA_ATTR_MAP[layer.name]) {
     attrs.push(SWIPER_DATA_ATTR_MAP[layer.name]);
+  }
+
+  if (isSliderChromeButton(layer.name)) {
+    attrs.push('type="button"');
+    if (!layer.settings?.customAttributes?.['aria-label']) {
+      attrs.push(`aria-label="${escapeHtml(SLIDER_BUTTON_ARIA_LABELS[layer.name])}"`);
+    }
   }
 
   // Add slider settings as data attribute on the root slider layer
@@ -4909,10 +4918,11 @@ export function layerToHtml(
     attrs.push('data-layer-type="image"');
 
     const imageAlt = layer.variables?.image?.alt;
+    let resolvedAlt = '';
     if (imageAlt && imageAlt.type === 'dynamic_text') {
-      const resolvedAlt = resolveInlineVariablesFromData(imageAlt.data.content, effectiveCollectionItemData, pageCollectionItemData, 'UTC', effectiveLayerDataMap);
-      attrs.push(`alt="${escapeHtml(resolvedAlt)}"`);
+      resolvedAlt = resolveInlineVariablesFromData(imageAlt.data.content, effectiveCollectionItemData, pageCollectionItemData, 'UTC', effectiveLayerDataMap);
     }
+    attrs.push(`alt="${escapeHtml(resolvedAlt)}"`);
 
     if (intrinsicWidth) attrs.push(`width="${intrinsicWidth}"`);
     if (intrinsicHeight) attrs.push(`height="${intrinsicHeight}"`);
@@ -4941,7 +4951,8 @@ export function layerToHtml(
       const embedUrl = `https://www.${domain}/embed/${videoId}${params.length > 0 ? '?' + params.join('&') : ''}`;
 
       attrs.push(`src="${escapeHtml(embedUrl)}"`);
-      attrs.push('frameborder="0"');
+      attrs.push(`title="${escapeHtml(layer.customName || 'YouTube video')}"`);
+      attrs.push('loading="lazy"');
       attrs.push('allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"');
       attrs.push('allowfullscreen');
       attrs.push('data-layer-type="video"');
@@ -4974,10 +4985,10 @@ export function layerToHtml(
       const iframeProps = getMapIframeProps(mapSettings, mapToken);
       const attrsStr = attrs.length > 0 ? ' ' + attrs.join(' ') : '';
       if (iframeProps.type === 'src') {
-        return `<div${attrsStr}><iframe src="${escapeHtml(iframeProps.src)}" referrerpolicy="no-referrer-when-downgrade" loading="lazy" style="width:100%;height:100%;border:none;display:block" title="Map"></iframe></div>`;
+        return `<div${attrsStr}><iframe src="${escapeHtml(iframeProps.src)}" referrerpolicy="no-referrer-when-downgrade" loading="lazy" style="width:100%;height:100%;border:none;display:block" title="${escapeHtml(layer.customName || 'Map')}"></iframe></div>`;
       }
       const escapedSrcdoc = escapeHtml(iframeProps.srcDoc);
-      return `<div${attrsStr}><iframe srcdoc="${escapedSrcdoc}" sandbox="allow-scripts allow-same-origin" style="width:100%;height:100%;border:none;display:block" title="Map"></iframe></div>`;
+      return `<div${attrsStr}><iframe srcdoc="${escapedSrcdoc}" sandbox="allow-scripts allow-same-origin" loading="lazy" style="width:100%;height:100%;border:none;display:block" title="${escapeHtml(layer.customName || 'Map')}"></iframe></div>`;
     }
 
     const attrsStr = attrs.length > 0 ? ' ' + attrs.join(' ') : '';
@@ -5043,6 +5054,10 @@ export function layerToHtml(
     }
     // Add data-icon attribute to trigger CSS styling
     attrs.push('data-icon="true"');
+    const iconAttrs = layer.settings?.customAttributes;
+    if (!iconAttrs?.['aria-hidden'] && !iconAttrs?.['aria-label']) {
+      attrs.push('aria-hidden="true"');
+    }
   }
 
   // Handle Code Embed layers - render as iframe for SSR
@@ -5089,7 +5104,8 @@ export function layerToHtml(
     attrs.push(`srcdoc="${escapedIframeContent}"`);
     attrs.push('sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals"');
     attrs.push('style="width: 100%; border: none; display: block;"');
-    attrs.push(`title="Code Embed ${layer.id}"`);
+    attrs.push(`title="${escapeHtml(layer.customName || 'Code embed')}"`);
+    attrs.push('loading="lazy"');
 
     const attrsStr = attrs.length > 0 ? ' ' + attrs.join(' ') : '';
     return `<iframe${attrsStr}></iframe>`;
@@ -5196,10 +5212,11 @@ export function layerToHtml(
     : layer.children;
 
   // Render children
+  const childLinkContext: PageLinkContext = { ...pageLinkContext, parentLayerName: layer.name };
   const childrenHtml = effectiveChildren
     ? effectiveChildren
       .map((child) =>
-        layerToHtml(child, effectiveCollectionItemId, pages, folders, collectionItemSlugs, locale, translations, anchorMap, effectiveCollectionItemData, pageCollectionItemData, assetMap, effectiveLayerDataMap, components, ancestorComponentIds, layer.name === 'slides', pageLinkContext)
+        layerToHtml(child, effectiveCollectionItemId, pages, folders, collectionItemSlugs, locale, translations, anchorMap, effectiveCollectionItemData, pageCollectionItemData, assetMap, effectiveLayerDataMap, components, ancestorComponentIds, layer.name === 'slides', childLinkContext)
       )
       .join('')
     : '';
