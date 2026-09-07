@@ -127,6 +127,32 @@ function stampChunk(res: StampedResponse, chunk: unknown, encoding?: BufferEncod
   return stampHtmlDocument(combined);
 }
 
+/**
+ * Stamping grows the document, so a Content-Length measured from the unstamped
+ * HTML truncates the response. Vercel serves prerendered and ISR pages as a
+ * single buffer with the header preset, so this path is the norm on cloud —
+ * self-hosted streams SSR chunked and never hits it. Correct the header when
+ * the whole body is known, otherwise drop it and let the response be chunked.
+ */
+function syncContentLength(res: StampedResponse, payload: unknown, isFinal: boolean): void {
+  // Only a stamped body changed size; skipped and compressed responses must
+  // keep the length the caller declared.
+  if (res.__ycodeStampState !== 'done') {
+    return;
+  }
+
+  if (res.headersSent || res.getHeader('content-length') === undefined) {
+    return;
+  }
+
+  if (isFinal && typeof payload === 'string') {
+    res.setHeader('content-length', Buffer.byteLength(payload, 'utf8'));
+    return;
+  }
+
+  res.removeHeader('content-length');
+}
+
 function flushBuffer(res: StampedResponse): string | undefined {
   const leftover = res.__ycodeStampBuffer;
   res.__ycodeStampBuffer = undefined;
@@ -183,6 +209,8 @@ function wrapResponse(res: StampedResponse): void {
       return true;
     }
 
+    syncContentLength(this, stamped, false);
+
     return callWrite(innerWrite as LooseWrite, stamped, encodingOrCb, maybeCb);
   };
 
@@ -205,6 +233,8 @@ function wrapResponse(res: StampedResponse): void {
     }
 
     const endCb = chunkIsCallback ? chunk as WriteCallback : callback;
+
+    syncContentLength(this, payload, true);
 
     if (payload === undefined) {
       if (endCb) {
