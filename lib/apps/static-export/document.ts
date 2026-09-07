@@ -12,6 +12,7 @@ import { layerToHtml, buildAnchorMap } from '@/lib/page-fetcher'
 import type { PageData } from '@/lib/page-fetcher'
 import type { FontPreload } from '@/lib/font-utils'
 import { getClassesString } from '@/lib/layer-utils'
+import { SLIDER_BUTTON_RESET_CSS } from '@/lib/slider-constants'
 import { getEffectiveApplyStyle } from '@/lib/animation-utils'
 import { buildYcodeHtmlComments } from '@/lib/ycode-html-comment'
 
@@ -717,6 +718,7 @@ export function buildDocument({
 
   if (includeSwiper) {
     head.push(`<link rel="stylesheet" href="${SWIPER_CSS_PATH}" />`)
+    head.push(`<style>${SLIDER_BUTTON_RESET_CSS}</style>`)
   }
 
   // Custom head code: global first (site-wide), then page-specific. Emitted
