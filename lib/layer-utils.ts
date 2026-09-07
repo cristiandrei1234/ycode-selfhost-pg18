@@ -1789,11 +1789,11 @@ const LAYER_NAME_TO_HTML_TAG: Record<string, string> = {
   slides: 'div',
   slide: 'div',
   slideNavigationWrapper: 'div',
-  slideButtonPrev: 'div',
-  slideButtonNext: 'div',
+  slideButtonPrev: 'button',
+  slideButtonNext: 'button',
   slidePaginationWrapper: 'div',
   slideBullets: 'div',
-  slideBullet: 'div',
+  slideBullet: 'button',
   slideFraction: 'div',
 
   // Lightbox
@@ -1810,16 +1810,33 @@ const LAYER_NAME_TO_HTML_TAG: Record<string, string> = {
   radio: 'input',
 };
 
-export function getLayerHtmlTag(layer: Layer): string {
+export function getLayerHtmlTag(layer: Layer, parentName?: string): string {
   if (layer.id === 'body' || layer.name === 'body') {
     return 'div';
   }
 
   if (layer.settings?.tag) {
-    return layer.settings.tag;
+    return coerceSliderNavChildTag(layer.settings.tag, layer, parentName);
   }
 
-  return LAYER_NAME_TO_HTML_TAG[layer.name] || layer.name || 'div';
+  const tag = LAYER_NAME_TO_HTML_TAG[layer.name] || layer.name || 'div';
+  return coerceSliderNavChildTag(tag, layer, parentName);
+}
+
+/**
+ * Prev/next slider wrappers render as <button>. Their visual child is stored
+ * as a `div`, which is invalid inside a button — coerce it to `span`.
+ */
+function coerceSliderNavChildTag(tag: string, layer: Layer, parentName?: string): string {
+  if (
+    (parentName === 'slideButtonPrev' || parentName === 'slideButtonNext')
+    && layer.name === 'div'
+    && tag === 'div'
+  ) {
+    return 'span';
+  }
+
+  return tag;
 }
 
 /**
