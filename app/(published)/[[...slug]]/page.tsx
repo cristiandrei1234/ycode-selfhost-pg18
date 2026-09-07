@@ -5,6 +5,7 @@ import { addCacheTag } from '@vercel/functions';
 import Link from 'next/link';
 import type { Metadata } from 'next';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { GLOBAL_SETTINGS_TAG } from '@/lib/cache-tags';
 import { buildSlugPath } from '@/lib/page-utils';
 import { generatePageMetadata, fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
 import { fetchHomepage, fetchPageByPath, fetchPageByPathForMetadata, fetchErrorPage, splitPageData, reassemblePageData, slimPageData } from '@/lib/page-fetcher';
@@ -244,10 +245,13 @@ async function fetchCachedRedirects(): Promise<RedirectType[] | null> {
 
 async function fetchCachedGlobalSettings() {
   try {
+    // Also tagged on its own so a selective publish can refresh it —
+    // `published_at` changes on every publish, and re-rendered pages must
+    // see the new one even when no global resource changed.
     return await unstable_cache(
       async () => fetchGlobalPageSettings(),
       ['data-for-global-settings'],
-      { tags: ['all-pages'], revalidate: false }
+      { tags: ['all-pages', GLOBAL_SETTINGS_TAG], revalidate: false }
     )();
   } catch {
     return {
