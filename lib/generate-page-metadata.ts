@@ -213,7 +213,7 @@ const fetchHreflangDataset = cache(async (): Promise<HreflangDataset> => {
  * Build the hreflang alternates for a page on a multilingual site. Returns an
  * empty array when hreflang shouldn't be emitted (single locale or no
  * resolvable alternates). Rendered as lowercase `<link rel="alternate"
- * hreflang>` tags (see HreflangAlternateLinks) rather than via Next's
+ * hreflang>` tags (see HreflangAlternateLinks / SiteDocumentLayout) rather than via Next's
  * `metadata.alternates.languages`, which React 19 emits as camelCase `hrefLang`.
  */
 export async function buildPageHreflangAlternatesForPage(
@@ -341,8 +341,8 @@ export async function generatePageMetadata(
       };
     }
 
-    // hreflang alternates are rendered as lowercase <link> tags in the page
-    // head (see HreflangAlternateLinks / PageRenderer), not via
+    // hreflang alternates are rendered as lowercase <link> tags in the document
+    // layout (see HreflangAlternateLinks / SiteDocumentLayout), not via
     // metadata.alternates.languages — React 19 emits that map's `hrefLang`
     // prop verbatim, but the HTML/Google standard is lowercase `hreflang`.
   }

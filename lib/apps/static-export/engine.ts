@@ -9,6 +9,7 @@
 import { randomUUID } from 'crypto'
 
 import { getAssetProxyUrl } from '@/lib/asset-utils'
+import { buildDocumentSeoLinks } from '@/lib/document-seo-links'
 import {
   buildCustomFontsCss,
   buildFontClassesCss,
@@ -23,12 +24,14 @@ import { getPublishedFonts } from '@/lib/repositories/fontRepository'
 import { getSettingByKey } from '@/lib/repositories/settingsRepository'
 import { getTranslationsByLocale } from '@/lib/repositories/translationRepository'
 import { getSupabaseAdmin } from '@/lib/supabase-server'
+import { getSiteBaseUrl } from '@/lib/url-utils'
 
-import type { Locale, Page, PageFolder } from '@/types'
+import type { Locale, Page, PageFolder, Translation } from '@/types'
 
 import { collectPublicAssets, collectSupabaseAssets } from './asset-bundler'
 import { getExportConfig, saveLastExportJob } from './config'
 import { buildDocument, SWIPER_CSS_PATH } from './document'
+import { pagePathFromOutputKey } from './paths'
 import {
   buildTranslationsMap,
   resolvePages,
@@ -149,6 +152,7 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
       globalCustomCodeHead,
       globalCustomCodeBody,
       publishedAt,
+      globalCanonicalUrl,
       localeResult,
     ] = await Promise.all([
       client
@@ -162,6 +166,7 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
       getSettingByKey('custom_code_head').catch(() => null),
       getSettingByKey('custom_code_body').catch(() => null),
       getSettingByKey('published_at').catch(() => null),
+      getSettingByKey('global_canonical_url').catch(() => null),
       client
         .from('locales')
         .select('*')
@@ -178,6 +183,15 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
     // non-default published locale (writing to `<code>/...`).
     const defaultLocale = locales.find((l) => l.is_default) ?? null
     const additionalLocales = locales.filter((l) => !l.is_default)
+    const siteBaseUrl = getSiteBaseUrl({
+      globalCanonicalUrl: typeof globalCanonicalUrl === 'string' ? globalCanonicalUrl : null,
+    })
+
+    const translationsByLocale = new Map<string, Record<string, Translation>>()
+    for (const locale of additionalLocales) {
+      const translations = await getTranslationsByLocale(locale.id, true)
+      translationsByLocale.set(locale.id, buildTranslationsMap(translations))
+    }
 
     if (!publishedCss) {
       console.warn(
@@ -211,6 +225,15 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
       try {
         for await (const resolved of resolvePages(page, folders, pages, ctx)) {
           yieldedAny = true
+          const seoLinks = buildDocumentSeoLinks({
+            pagePath: pagePathFromOutputKey(resolved.outputKey),
+            baseUrl: siteBaseUrl,
+            page: resolved.page,
+            folders,
+            locales,
+            translationsByLocale,
+            dynamicSlug: resolved.dynamicSlug,
+          })
           const html = buildDocument({
             page: resolved.page,
             bodyHtml: resolved.bodyHtml,
@@ -228,6 +251,9 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
             pageCustomCodeHead: resolved.pageCustomCodeHead,
             pageCustomCodeBody: resolved.pageCustomCodeBody,
             publishedAt: typeof publishedAt === 'string' ? publishedAt : null,
+            canonicalUrl: seoLinks.canonical,
+            ogUrl: seoLinks.ogUrl,
+            hreflang: seoLinks.hreflang,
           })
 
           // Collect Ycode's built-in placeholder URLs referenced from this
@@ -278,8 +304,7 @@ export async function exportSite(presetJobId?: string): Promise<ExportJob> {
     }
 
     for (const locale of additionalLocales) {
-      const translations = await getTranslationsByLocale(locale.id, true)
-      const translationsMap = buildTranslationsMap(translations)
+      const translationsMap = translationsByLocale.get(locale.id) ?? {}
       const ctx: LocaleContext = { locale, translations: translationsMap }
       for (const page of pages) {
         await renderPage(page, ctx)

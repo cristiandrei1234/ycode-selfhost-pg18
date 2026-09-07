@@ -1,6 +1,7 @@
 import '@/app/site.css';
 import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
+import HreflangAlternateLinks from '@/components/HreflangAlternateLinks';
 import RootLayoutShell, { defaultMetadata } from '@/components/RootLayoutShell';
 import { composeDocumentBodyClassName } from '@/lib/body-classes';
 import { fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
@@ -19,8 +20,8 @@ interface SiteDocumentLayoutProps {
   lang: string;
   /**
    * Public pathname for this document (`/` or `/fr/about`). Used to inject
-   * page-level custom `<head>` code and body-layer classes without reading
-   * request headers.
+   * page-level custom `<head>` code, body-layer classes, and hreflang
+   * without reading request headers.
    */
   pathname: string;
 }
@@ -46,6 +47,14 @@ export default async function SiteDocumentLayout({
     ]);
     publishedAt = globalSettings.publishedAt ?? null;
     bodyClasses = pageChrome.bodyClasses;
+    if (pageChrome.hreflang.length > 0) {
+      headElements.push(
+        <HreflangAlternateLinks
+          key="hreflang"
+          alternates={pageChrome.hreflang}
+        />
+      );
+    }
     if (globalSettings.globalCustomCodeHead) {
       headElements.push(...renderRootLayoutHeadCode(globalSettings.globalCustomCodeHead));
     }
