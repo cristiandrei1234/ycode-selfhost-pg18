@@ -884,13 +884,11 @@ export default async function PageRenderer({
         </>
       )}
 
-      {/* Apply body layer classes immediately to prevent FOUC */}
-      <script
-        dangerouslySetInnerHTML={{
-          __html: `document.body.className=document.body.className.replace(/\\bycode-body-applied\\b/g,'')+' ${(bodyClasses || 'bg-white').replace(/'/g, "\\'")} ycode-body-applied'`,
-        }}
-      />
-      <BodyClassApplier classes={bodyClasses || 'bg-white'} />
+      {/* Error pages (401/404) can render inside a layout that resolved a
+          different URL's body classes. Replace them before the next paint. */}
+      {page.error_page != null && (
+        <BodyClassApplier classes={bodyClasses || 'bg-white'} />
+      )}
 
       <div
         id="ybody"

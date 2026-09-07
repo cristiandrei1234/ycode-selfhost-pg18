@@ -2,9 +2,10 @@ import '@/app/site.css';
 import type { ReactNode } from 'react';
 import type { Metadata } from 'next';
 import RootLayoutShell, { defaultMetadata } from '@/components/RootLayoutShell';
+import { composeDocumentBodyClassName } from '@/lib/body-classes';
 import { fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
 import { renderRootLayoutHeadCode } from '@/lib/parse-head-html';
-import { resolvePageCustomHeadCode } from '@/lib/resolve-page-head-code';
+import { resolvePageDocumentChrome } from '@/lib/resolve-page-head-code';
 import { runWithYcodeStamp } from '@/lib/ycode-html-comment';
 
 const ycodeGeneratorMetadata: Metadata = {
@@ -18,15 +19,16 @@ interface SiteDocumentLayoutProps {
   lang: string;
   /**
    * Public pathname for this document (`/` or `/fr/about`). Used to inject
-   * page-level custom `<head>` code without reading request headers.
+   * page-level custom `<head>` code and body-layer classes without reading
+   * request headers.
    */
   pathname: string;
 }
 
 /**
  * Shared `<html>` document for published, preview, and pagination routes.
- * `lang` and `pathname` must come from route params (or a rewrite's original
- * path) so cloud ISR can still emit the attribute in the first HTML byte.
+ * `lang`, `dir`, and `pathname` must come from route params (or a rewrite's
+ * original path) so cloud ISR can still emit them in the first HTML byte.
  */
 export default async function SiteDocumentLayout({
   children,
@@ -35,18 +37,20 @@ export default async function SiteDocumentLayout({
 }: SiteDocumentLayoutProps) {
   const headElements: ReactNode[] = [];
   let publishedAt: string | null = null;
+  let bodyClasses = '';
 
   try {
-    const [globalSettings, pageCustomHead] = await Promise.all([
+    const [globalSettings, pageChrome] = await Promise.all([
       fetchGlobalPageSettings(),
-      resolvePageCustomHeadCode(pathname),
+      resolvePageDocumentChrome(pathname),
     ]);
     publishedAt = globalSettings.publishedAt ?? null;
+    bodyClasses = pageChrome.bodyClasses;
     if (globalSettings.globalCustomCodeHead) {
       headElements.push(...renderRootLayoutHeadCode(globalSettings.globalCustomCodeHead));
     }
-    if (pageCustomHead) {
-      headElements.push(...renderRootLayoutHeadCode(pageCustomHead, 'page-head'));
+    if (pageChrome.customHead) {
+      headElements.push(...renderRootLayoutHeadCode(pageChrome.customHead, 'page-head'));
     }
   } catch {
     // Supabase not configured — stamp still emits the Made in line
@@ -56,7 +60,7 @@ export default async function SiteDocumentLayout({
     <RootLayoutShell
       lang={lang}
       headElements={headElements}
-      bodyClassName="font-sans"
+      bodyClassName={composeDocumentBodyClassName(bodyClasses)}
     >
       {children}
     </RootLayoutShell>

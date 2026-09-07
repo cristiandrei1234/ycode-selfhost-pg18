@@ -11,24 +11,14 @@
 import { layerToHtml, buildAnchorMap } from '@/lib/page-fetcher'
 import type { PageData } from '@/lib/page-fetcher'
 import type { FontPreload } from '@/lib/font-utils'
-import { getClassesString } from '@/lib/layer-utils'
+import { htmlDirFromLang } from '@/lib/html-lang'
 import { SLIDER_BUTTON_RESET_CSS } from '@/lib/slider-constants'
 import { getEffectiveApplyStyle } from '@/lib/animation-utils'
 import { buildYcodeHtmlComments } from '@/lib/ycode-html-comment'
 
 import type { Layer, Page, PageFolder } from '@/types'
 
-/**
- * Extract the class string from the synthetic `body` layer so the exporter
- * can apply it to the real `<body>` element. The editor's Canvas does the
- * same thing — without it, the user's body background / text color / fonts
- * are silently dropped from the export.
- */
-export function getBodyClasses(layers: Layer[] | null | undefined): string {
-  if (!layers || layers.length === 0) return ''
-  const bodyLayer = layers.find((l) => l.id === 'body' || l.name === 'body')
-  return bodyLayer ? getClassesString(bodyLayer) : ''
-}
+export { getBodyClasses } from '@/lib/body-classes'
 
 // =============================================================================
 // Render context + body rendering
@@ -762,7 +752,7 @@ export function buildDocument({
   return [
     '<!DOCTYPE html>',
     ...buildYcodeHtmlComments(publishedAt).split('\n'),
-    `<html lang="${escapeHtml(lang)}">`,
+    `<html lang="${escapeHtml(lang)}" dir="${htmlDirFromLang(lang)}">`,
     '<head>',
     ...head.map((line) => indent + line),
     '</head>',
