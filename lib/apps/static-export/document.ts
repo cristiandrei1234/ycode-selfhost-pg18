@@ -12,6 +12,7 @@ import { layerToHtml, buildAnchorMap } from '@/lib/page-fetcher'
 import type { PageData } from '@/lib/page-fetcher'
 import type { FontPreload } from '@/lib/font-utils'
 import { htmlDirFromLang } from '@/lib/html-lang'
+import type { HreflangAlternate } from '@/lib/hreflang-utils'
 import { SLIDER_BUTTON_RESET_CSS } from '@/lib/slider-constants'
 import { getEffectiveApplyStyle } from '@/lib/animation-utils'
 import { buildYcodeHtmlComments } from '@/lib/ycode-html-comment'
@@ -650,6 +651,12 @@ export interface BuildHtmlInput {
   pageCustomCodeBody?: string | null
   /** ISO timestamp of the last publish, used for the HTML source stamp. */
   publishedAt?: string | null
+  /** Absolute canonical URL for this export file. Omitted without a site base URL. */
+  canonicalUrl?: string | null
+  /** Absolute `og:url`. Same value as canonical when present. */
+  ogUrl?: string | null
+  /** Locale alternate cluster. Empty for single-locale / noindex / error pages. */
+  hreflang?: HreflangAlternate[]
 }
 
 export function buildDocument({
@@ -669,6 +676,9 @@ export function buildDocument({
   pageCustomCodeHead,
   pageCustomCodeBody,
   publishedAt,
+  canonicalUrl,
+  ogUrl,
+  hreflang = [],
 }: BuildHtmlInput): string {
   const seo = extractSeo(page)
   const title = seo.title || page.name
@@ -685,7 +695,18 @@ export function buildDocument({
     head.push(`<meta name="description" content="${escapeHtml(description)}" />`)
     head.push(`<meta property="og:description" content="${escapeHtml(description)}" />`)
   }
+  if (canonicalUrl) {
+    head.push(`<link rel="canonical" href="${escapeHtml(canonicalUrl)}" />`)
+  }
+  for (const alt of hreflang) {
+    head.push(
+      `<link rel="alternate" hreflang="${escapeHtml(alt.hreflang)}" href="${escapeHtml(alt.href)}" />`,
+    )
+  }
   head.push(`<meta property="og:title" content="${escapeHtml(title)}" />`)
+  if (ogUrl) {
+    head.push(`<meta property="og:url" content="${escapeHtml(ogUrl)}" />`)
+  }
   head.push(`<meta property="og:type" content="website" />`)
   if (ogImage) {
     head.push(`<meta property="og:image" content="${escapeHtml(ogImage)}" />`)

@@ -1,8 +1,7 @@
 /**
- * Resolve document-level page chrome (custom `<head>` HTML + body classes)
- * from the request pathname so the site layout can bake them into the SSR
- * document. Body classes must be on `<body>` in the first HTML byte to avoid
- * a background/font flash (the FOUC twin of `<html lang>`).
+ * Resolve document-level page chrome (custom `<head>` HTML, body classes,
+ * hreflang) from the request pathname so the site layout can bake them into
+ * the SSR document without calling `headers()`.
  *
  * SERVER-ONLY: uses page-fetcher, page_layers, and CMS placeholder resolution.
  */
@@ -11,20 +10,25 @@ import 'server-only';
 
 import { unstable_cache } from 'next/cache';
 import { getBodyClasses } from '@/lib/body-classes';
+import { shouldEmitHreflang } from '@/lib/document-seo-links';
+import { buildPageHreflangAlternatesForPage, fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
 import { fetchErrorPage, fetchHomepage, fetchPageByPathForMetadata } from '@/lib/page-fetcher';
 import { parsePathnameForPageHead } from '@/lib/page-head-path';
 import { getDraftLayers, getPublishedLayers } from '@/lib/repositories/pageLayersRepository';
 import { resolveCustomCodePlaceholders } from '@/lib/resolve-cms-variables';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { getSiteBaseUrl } from '@/lib/url-utils';
 
+import type { HreflangAlternate } from '@/lib/hreflang-utils';
 import type { CollectionField, CollectionItemWithValues, Page } from '@/types';
 
 export interface PageDocumentChrome {
   customHead: string;
   bodyClasses: string;
+  hreflang: HreflangAlternate[];
 }
 
-const EMPTY_CHROME: PageDocumentChrome = { customHead: '', bodyClasses: '' };
+const EMPTY_CHROME: PageDocumentChrome = { customHead: '', bodyClasses: '', hreflang: [] };
 
 async function resolveHeadFromPage(
   page: Page,
@@ -42,6 +46,31 @@ async function resolveHeadFromPage(
   }
 
   return raw;
+}
+
+async function loadHreflangForPage(
+  page: Page,
+  collectionItem: CollectionItemWithValues | undefined,
+  isPreview: boolean,
+): Promise<HreflangAlternate[]> {
+  if (!shouldEmitHreflang(page, isPreview)) {
+    return [];
+  }
+
+  try {
+    const settings = await fetchGlobalPageSettings(isPreview);
+    const baseUrl = getSiteBaseUrl({
+      globalCanonicalUrl: settings.globalCanonicalUrl,
+    });
+    if (!baseUrl) {
+      return [];
+    }
+
+    return buildPageHreflangAlternatesForPage(page, baseUrl, collectionItem);
+  } catch (error) {
+    console.error('[resolve-page-head-code] Failed to load hreflang:', error);
+    return [];
+  }
 }
 
 async function loadBodyClassesForPageId(
@@ -102,6 +131,7 @@ async function loadPageDocumentChrome(
           data.collectionFields
         ),
         bodyClasses: getBodyClasses(data.pageLayers?.layers),
+        hreflang: await loadHreflangForPage(data.page, data.collectionItem, !isPublished),
       };
     }
 
@@ -115,6 +145,7 @@ async function loadPageDocumentChrome(
       return {
         customHead: await resolveHeadFromPage(data.page, isPublished),
         bodyClasses: getBodyClasses(data.pageLayers?.layers),
+        hreflang: await loadHreflangForPage(data.page, undefined, !isPublished),
       };
     }
 
@@ -125,6 +156,7 @@ async function loadPageDocumentChrome(
       return {
         customHead: '',
         bodyClasses: await loadBodyClassesForErrorPage(404, isPublished),
+        hreflang: [],
       };
     }
 
@@ -137,6 +169,7 @@ async function loadPageDocumentChrome(
         data.collectionFields
       ),
       bodyClasses: fromFetchedLayers || await loadBodyClassesForPageId(data.page.id, isPublished),
+      hreflang: await loadHreflangForPage(data.page, data.collectionItem, !isPublished),
     };
   } catch (error) {
     console.error('[resolve-page-head-code] Failed to load page document chrome:', error);
@@ -167,7 +200,7 @@ export async function resolvePageDocumentChrome(
 
   return unstable_cache(
     () => loadPageDocumentChrome(slugPath, true, errorCode),
-    ['page-document-chrome', cacheKey],
+    ['page-document-chrome-v2', cacheKey],
     { tags: [routeTag, 'all-pages'], revalidate: false }
   )();
 }
