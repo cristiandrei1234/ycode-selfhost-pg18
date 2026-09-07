@@ -19,9 +19,8 @@ interface RootLayoutShellProps {
    */
   bodyClassName?: string;
   /**
-   * Language for the <html lang> attribute. Omitted for public published sites
-   * so the per-page locale (set on the content wrapper by PageRenderer) is the
-   * source of truth instead of a hardcoded `en`.
+   * Language for the <html lang> attribute. Published sites pass the locale
+   * resolved from the URL so the attribute is present in the SSR HTML.
    */
   lang?: string;
 }
