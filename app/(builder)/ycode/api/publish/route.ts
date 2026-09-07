@@ -619,6 +619,15 @@ export async function POST(request: NextRequest) {
       stats.tables.css.durationMs = Math.round(performance.now() - stepStart);
     }
 
+    // Save the published timestamp BEFORE invalidating and warming: the
+    // re-rendered pages read `published_at` (HTML source stamp, metadata),
+    // so it has to be on disk when the warmers hit them.
+    try {
+      result.published_at_setting = await savePublishedAt(publishedAt);
+    } catch {
+      // Silently handle - non-fatal
+    }
+
     // Selective cache invalidation: only invalidate pages that actually changed.
     //
     // Global triggers (full invalidation):
@@ -888,13 +897,6 @@ export async function POST(request: NextRequest) {
     } catch {
       // Fallback: if selective invalidation fails, nuke everything
       try { await clearAllCache(); } catch { /* non-fatal */ }
-    }
-
-    // Save published timestamp to settings
-    try {
-      result.published_at_setting = await savePublishedAt(publishedAt);
-    } catch {
-      // Silently handle - non-fatal
     }
 
     // Dispatch the site.published webhook event. The dispatcher is the only

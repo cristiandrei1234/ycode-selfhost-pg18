@@ -1,5 +1,6 @@
 import { revalidateTag, revalidatePath } from 'next/cache';
 import { invalidateByTag } from '@vercel/functions';
+import { GLOBAL_SETTINGS_TAG } from '@/lib/cache-tags';
 import { getSupabaseAdmin, getSupabaseConfig } from '@/lib/supabase-server';
 import { buildSlugPath, normalizeSlugSegment } from '@/lib/page-utils';
 import type { Page, PageFolder } from '@/types';
@@ -543,6 +544,12 @@ export async function selectiveInvalidation(
     return { strategy: 'full', invalidatedRoutes: [], reason: 'global resources changed' };
   }
 
+  // The global-settings entry carries `published_at`, which changes on every
+  // publish. Route purges alone leave it stale, so whatever re-renders after
+  // this call (changed pages, locale routes, deleted-page fallbacks) would
+  // read the previous publish's settings. Cheap: one tag, one call.
+  await invalidateGlobalSettings();
+
   const allAffectedIds = [...new Set([...changedPageIds, ...indirectlyAffectedPageIds])];
 
   if (allAffectedIds.length === 0) {
@@ -567,6 +574,24 @@ export async function selectiveInvalidation(
   }
 
   return { strategy: 'selective', invalidatedRoutes: routePaths };
+}
+
+/**
+ * Drop the cached global settings (published_at, custom code, favicon…) so
+ * the next page render re-reads them. Covered implicitly by clearAllCache.
+ */
+export async function invalidateGlobalSettings(): Promise<boolean> {
+  try {
+    if (process.env.VERCEL === '1') {
+      await invalidateByTag(GLOBAL_SETTINGS_TAG);
+    } else {
+      revalidateTag(GLOBAL_SETTINGS_TAG, { expire: 0 });
+    }
+    return true;
+  } catch (error) {
+    console.error('❌ [Cache] Global settings invalidation error:', error);
+    return false;
+  }
 }
 
 /**
