@@ -569,10 +569,6 @@ export default async function PageRenderer({
 
   const { bodyClasses, childLayers: rawChildLayers } = extractBodyLayer(resolvedLayers);
 
-  // Language advertised on the content wrapper. <html lang> is set by the
-  // document layout from the URL so crawlers see it in the initial HTML.
-  const resolvedLang = locale?.code || availableLocales.find((l) => l.is_default)?.code || undefined;
-
   // Generate CSS for initial animation states to prevent flickering
   const { css: initialAnimationCSS, hiddenLayerInfo } = generateInitialAnimationCSS(resolvedLayers);
 
@@ -869,7 +865,6 @@ export default async function PageRenderer({
         className="contents"
         data-layer-id="body"
         data-layer-type="div"
-        lang={resolvedLang}
       >
         <LayerRendererPublic
           layers={childLayers}
