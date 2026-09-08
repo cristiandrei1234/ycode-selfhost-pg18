@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react';
 import SiteDocumentLayout, { generateSiteMetadata } from '@/components/site-document-layout';
+import { fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
 import { resolveHtmlLang } from '@/lib/resolve-html-lang';
+import { getSiteBaseUrl } from '@/lib/url-utils';
 
 export const generateMetadata = generateSiteMetadata;
 
@@ -22,13 +24,24 @@ export default async function PublishedLayout({
 }: PublishedLayoutProps) {
   const { slug } = await params;
   const slugPath = slug?.join('/') ?? '';
-  const lang = await resolveHtmlLang(slugPath, true);
   const pathname = slugPath ? `/${slugPath}` : '/';
+
+  const [lang, globalSettings] = await Promise.all([
+    resolveHtmlLang(slugPath, true),
+    fetchGlobalPageSettings().catch(() => null),
+  ]);
+
+  const baseUrl = getSiteBaseUrl({
+    globalCanonicalUrl: globalSettings?.globalCanonicalUrl ?? null,
+  });
 
   return (
     <SiteDocumentLayout
       lang={lang}
       pathname={pathname}
+      baseUrl={baseUrl}
+      publishedAt={globalSettings?.publishedAt ?? null}
+      globalCustomCodeHead={globalSettings?.globalCustomCodeHead ?? null}
     >
       {children}
     </SiteDocumentLayout>

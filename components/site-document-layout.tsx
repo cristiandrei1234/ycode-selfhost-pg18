@@ -24,28 +24,39 @@ interface SiteDocumentLayoutProps {
    * without reading request headers.
    */
   pathname: string;
+  /** Tenant to scope data fetches to (cloud). Omitted self-hosted. */
+  tenantId?: string;
+  /** Absolute site base URL for hreflang. Resolved by the caller. */
+  baseUrl?: string | null;
+  /** Site base URL used to absolutize asset URLs in custom head code. */
+  primaryDomainUrl?: string | null;
+  /** Publish time for the HTML source stamp. */
+  publishedAt?: string | null;
+  /** Site-wide custom `<head>` code, injected into the real document head. */
+  globalCustomCodeHead?: string | null;
 }
 
 /**
  * Shared `<html>` document for published, preview, and pagination routes.
- * `lang`, `dir`, and `pathname` must come from route params (or a rewrite's
- * original path) so cloud ISR can still emit them in the first HTML byte.
+ * `lang`, `dir`, and `pathname` come from route params (or a rewrite's original
+ * path) so cloud ISR can still emit them in the first HTML byte. Global
+ * settings are injected by the caller so this stays tenant-agnostic.
  */
 export default async function SiteDocumentLayout({
   children,
   lang,
   pathname,
+  tenantId,
+  baseUrl,
+  primaryDomainUrl = null,
+  publishedAt = null,
+  globalCustomCodeHead = null,
 }: SiteDocumentLayoutProps) {
   const headElements: ReactNode[] = [];
-  let publishedAt: string | null = null;
   let bodyClasses = '';
 
   try {
-    const [globalSettings, pageChrome] = await Promise.all([
-      fetchGlobalPageSettings(),
-      resolvePageDocumentChrome(pathname),
-    ]);
-    publishedAt = globalSettings.publishedAt ?? null;
+    const pageChrome = await resolvePageDocumentChrome(pathname, { tenantId, baseUrl, primaryDomainUrl });
     bodyClasses = pageChrome.bodyClasses;
     if (pageChrome.hreflang.length > 0) {
       headElements.push(
@@ -55,8 +66,8 @@ export default async function SiteDocumentLayout({
         />
       );
     }
-    if (globalSettings.globalCustomCodeHead) {
-      headElements.push(...renderRootLayoutHeadCode(globalSettings.globalCustomCodeHead));
+    if (globalCustomCodeHead) {
+      headElements.push(...renderRootLayoutHeadCode(globalCustomCodeHead));
     }
     if (pageChrome.customHead) {
       headElements.push(...renderRootLayoutHeadCode(pageChrome.customHead, 'page-head'));
