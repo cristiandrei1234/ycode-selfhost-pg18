@@ -1,30 +1,34 @@
 import type { ReactNode } from 'react';
-import { headers } from 'next/headers';
 import SiteDocumentLayout, { generateSiteMetadata } from '@/components/site-document-layout';
 import { fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
-import { parsePathnameForPageHead } from '@/lib/page-head-path';
 import { resolveHtmlLang } from '@/lib/resolve-html-lang';
 import { getSiteBaseUrl } from '@/lib/url-utils';
 
 export const generateMetadata = generateSiteMetadata;
 
-/**
- * Root layout for preview, pagination rewrites, and other non-published-page
- * public routes. Published pages use `(published)/[[...slug]]` so they can
- * set `<html lang>` from static params without calling headers().
- */
-export default async function SiteLayout({
-  children,
-}: Readonly<{
+interface PublishedLayoutProps {
   children: ReactNode;
-}>) {
-  const headersList = await headers();
-  const pathname = headersList.get('x-pathname') || '/';
-  const { isPreview, slugPath } = parsePathnameForPageHead(pathname);
+  params: Promise<{ slug?: string[] }>;
+}
+
+/**
+ * Root layout for published pages. Lives inside the optional catch-all so it
+ * receives the URL slug at static-generation time and can set `<html lang>`,
+ * `dir`, and `<body class>` in the first HTML byte — required for SEO / a11y
+ * (no after-paint script). Cloud ISR stays intact because this does not call
+ * headers().
+ */
+export default async function PublishedLayout({
+  children,
+  params,
+}: PublishedLayoutProps) {
+  const { slug } = await params;
+  const slugPath = slug?.join('/') ?? '';
+  const pathname = slugPath ? `/${slugPath}` : '/';
 
   const [lang, globalSettings] = await Promise.all([
-    resolveHtmlLang(slugPath, !isPreview),
-    fetchGlobalPageSettings(isPreview).catch(() => null),
+    resolveHtmlLang(slugPath, true),
+    fetchGlobalPageSettings().catch(() => null),
   ]);
 
   const baseUrl = getSiteBaseUrl({
