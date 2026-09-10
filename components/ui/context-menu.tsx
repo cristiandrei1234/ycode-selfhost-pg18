@@ -14,9 +14,10 @@ import Icon from '@/components/ui/icon';
 const ContextMenuReleaseGuard = React.createContext<React.MutableRefObject<boolean> | null>(null);
 
 /**
- * Overrides applied when the menu is portaled into a foreign container (e.g. the
- * canvas iframe body). Neutralises typography inherited from the edited page's
- * font classes and forces a max z-index so page layers can't paint over it.
+ * Overrides applied when the menu is portaled into a foreign container (the
+ * canvas iframe, or the parent body for canvas menus that must escape iframe
+ * clipping). Neutralises inherited typography and forces a max z-index so
+ * page layers and builder chrome can't paint over it.
  */
 const PORTAL_MENU_STYLE: React.CSSProperties = {
   fontFamily:

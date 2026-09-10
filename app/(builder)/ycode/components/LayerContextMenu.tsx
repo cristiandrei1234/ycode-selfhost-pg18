@@ -16,7 +16,7 @@ import {
   ContextMenuSeparator, ContextMenuShortcut, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
-import { useCanvasPortalContainer, useCanvasZoom } from '@/lib/canvas-portal-context';
+import { remapIframePointerEventToParent, useCanvasPortalContainer, useCanvasZoom } from '@/lib/canvas-portal-context';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useClipboardStore } from '@/stores/useClipboardStore';
@@ -54,9 +54,18 @@ interface LayerContextMenuProps {
 
 let pendingCloseRaf = 0;
 let activeMenuDocument: Document | null = null;
+let iframeDismissDoc: Document | null = null;
 let selectionFromMenu = false;
 
+function clearIframeDismissListener() {
+  if (iframeDismissDoc) {
+    iframeDismissDoc.removeEventListener('pointerdown', dismissActiveContextMenu, true);
+    iframeDismissDoc = null;
+  }
+}
+
 function dismissActiveContextMenu() {
+  clearIframeDismissListener();
   if (activeMenuDocument) {
     activeMenuDocument.dispatchEvent(
       new PointerEvent('pointerdown', { bubbles: true })
@@ -121,7 +130,10 @@ function LayerContextMenuInner({
   setLayerName,
 }: LayerContextMenuInnerProps) {
   const canvasPortalContainer = useCanvasPortalContainer();
-  const canvasZoom = useCanvasZoom();
+  // Canvas React trees run in the parent JS realm, so `document.body` is the
+  // parent document. Portal there so the menu is not clipped by the iframe
+  // (component-edit canvases are sized to content).
+  const menuPortalContainer = canvasPortalContainer ? document.body : undefined;
 
   const copyLayer = usePagesStore((state) => state.copyLayer);
   const deleteLayer = usePagesStore((state) => state.deleteLayer);
@@ -804,8 +816,7 @@ function LayerContextMenuInner({
     <>
       <ContextMenuContent
         className="w-46"
-        container={canvasPortalContainer}
-        style={canvasPortalContainer ? { zoom: 100 / canvasZoom } : undefined}
+        container={menuPortalContainer}
       >
         {canvasPortalContainer && layer && (
           <>
@@ -833,8 +844,7 @@ function LayerContextMenuInner({
         <ContextMenuSub>
           <ContextMenuSubTrigger>Paste</ContextMenuSubTrigger>
           <ContextMenuSubContent
-            container={canvasPortalContainer}
-            style={canvasPortalContainer ? { zoom: 100 / canvasZoom } : undefined}
+            container={menuPortalContainer}
           >
             {hasExternal && (externalKind === 'figma' || externalKind === 'webflow') && (
               <>
@@ -1053,6 +1063,7 @@ function LayerContextMenu({
   const [exportHtml, setExportHtml] = useState('');
   const [layerName, setLayerName] = useState('');
   const canvasPortalContainer = useCanvasPortalContainer();
+  const canvasZoom = useCanvasZoom();
 
   const anyDialogOpen =
     isComponentDialogOpen || isLayoutDialogOpen || isImportHtmlOpen || isExportHtmlOpen;
@@ -1064,7 +1075,14 @@ function LayerContextMenu({
 
       if (open) {
         dismissActiveContextMenu();
-        activeMenuDocument = canvasPortalContainer?.ownerDocument ?? document;
+        // Canvas menus portal to the parent document so they sit above the
+        // iframe. Dismiss must target that document; iframe clicks are wired
+        // separately because they don't bubble across the frame boundary.
+        activeMenuDocument = document;
+        if (canvasPortalContainer) {
+          iframeDismissDoc = canvasPortalContainer.ownerDocument;
+          iframeDismissDoc.addEventListener('pointerdown', dismissActiveContextMenu, true);
+        }
 
         // Detect a Webflow/Figma copy on the OS clipboard so the Paste submenu
         // can offer "Paste after / inside". Best-effort and silent: only read
@@ -1097,6 +1115,7 @@ function LayerContextMenu({
           cancelAnimationFrame(pendingCloseRaf);
           useEditorStore.getState().setCanvasContextMenuOpen(true);
         } else {
+          clearIframeDismissListener();
           pendingCloseRaf = requestAnimationFrame(() => {
             useEditorStore.getState().setCanvasContextMenuOpen(false);
           });
@@ -1112,7 +1131,12 @@ function LayerContextMenu({
     <ContextMenu onOpenChange={handleOpenChange}>
       <ContextMenuTrigger
         asChild
-        onContextMenu={(e) => e.stopPropagation()}
+        onContextMenu={(e) => {
+          e.stopPropagation();
+          if (canvasPortalContainer) {
+            remapIframePointerEventToParent(e, canvasPortalContainer, canvasZoom);
+          }
+        }}
       >
         {children}
       </ContextMenuTrigger>
