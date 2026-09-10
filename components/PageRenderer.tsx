@@ -206,6 +206,16 @@ function stripSSROnlyData(layers: Layer[]): Layer[] {
     delete stripped._collectionItemSlug;
     delete stripped._layerDataMap;
 
+    // Editor/server-only fields the public renderer never reads: `customName`
+    // (tree label), `open` (tree expand state), `restrictions` (copy/delete/move/
+    // editText guards) and `_originalLayerId` (server-side translation-lookup
+    // marker, consumed before this point). Embed iframe titles now use static
+    // generic strings instead of `customName`, so it is safe to drop here.
+    delete stripped.customName;
+    delete stripped.open;
+    delete stripped.restrictions;
+    delete (stripped as { _originalLayerId?: string })._originalLayerId;
+
     // Builder-only style resolution inputs. The flat `classes` string is the
     // already-resolved output, so the public renderer never reads these.
     delete stripped.styleIds;
