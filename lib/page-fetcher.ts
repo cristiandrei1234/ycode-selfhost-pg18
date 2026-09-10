@@ -4951,7 +4951,7 @@ export function layerToHtml(
       const embedUrl = `https://www.${domain}/embed/${videoId}${params.length > 0 ? '?' + params.join('&') : ''}`;
 
       attrs.push(`src="${escapeHtml(embedUrl)}"`);
-      attrs.push(`title="${escapeHtml(layer.customName || 'YouTube video')}"`);
+      attrs.push('title="YouTube video"');
       attrs.push('loading="lazy"');
       attrs.push('allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"');
       attrs.push('allowfullscreen');
@@ -4985,10 +4985,10 @@ export function layerToHtml(
       const iframeProps = getMapIframeProps(mapSettings, mapToken);
       const attrsStr = attrs.length > 0 ? ' ' + attrs.join(' ') : '';
       if (iframeProps.type === 'src') {
-        return `<div${attrsStr}><iframe src="${escapeHtml(iframeProps.src)}" referrerpolicy="no-referrer-when-downgrade" loading="lazy" style="width:100%;height:100%;border:none;display:block" title="${escapeHtml(layer.customName || 'Map')}"></iframe></div>`;
+        return `<div${attrsStr}><iframe src="${escapeHtml(iframeProps.src)}" referrerpolicy="no-referrer-when-downgrade" loading="lazy" style="width:100%;height:100%;border:none;display:block" title="Map"></iframe></div>`;
       }
       const escapedSrcdoc = escapeHtml(iframeProps.srcDoc);
-      return `<div${attrsStr}><iframe srcdoc="${escapedSrcdoc}" sandbox="allow-scripts allow-same-origin" loading="lazy" style="width:100%;height:100%;border:none;display:block" title="${escapeHtml(layer.customName || 'Map')}"></iframe></div>`;
+      return `<div${attrsStr}><iframe srcdoc="${escapedSrcdoc}" sandbox="allow-scripts allow-same-origin" loading="lazy" style="width:100%;height:100%;border:none;display:block" title="Map"></iframe></div>`;
     }
 
     const attrsStr = attrs.length > 0 ? ' ' + attrs.join(' ') : '';
@@ -5104,7 +5104,7 @@ export function layerToHtml(
     attrs.push(`srcdoc="${escapedIframeContent}"`);
     attrs.push('sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals"');
     attrs.push('style="width: 100%; border: none; display: block;"');
-    attrs.push(`title="${escapeHtml(layer.customName || 'Code embed')}"`);
+    attrs.push('title="Code embed"');
     attrs.push('loading="lazy"');
 
     const attrsStr = attrs.length > 0 ? ' ' + attrs.join(' ') : '';

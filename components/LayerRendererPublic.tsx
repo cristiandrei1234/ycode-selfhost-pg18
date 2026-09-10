@@ -1464,7 +1464,7 @@ const LayerItem: React.FC<{
             display: 'block',
             ...mergedStyle,
           }}
-          title={layer.customName || 'Code embed'}
+          title="Code embed"
           loading="lazy"
         />
       );
@@ -1520,7 +1520,7 @@ const LayerItem: React.FC<{
               border: 'none',
               display: 'block',
             }}
-            title={layer.customName || 'Map'}
+            title="Map"
             loading="lazy"
             suppressHydrationWarning
           />
@@ -1559,7 +1559,7 @@ const LayerItem: React.FC<{
             className: fullClassName,
             style: mergedStyle,
             src: embedUrl,
-            title: layer.customName || 'YouTube video',
+            title: 'YouTube video',
             loading: 'lazy',
             allow: 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture',
             allowFullScreen: true,
