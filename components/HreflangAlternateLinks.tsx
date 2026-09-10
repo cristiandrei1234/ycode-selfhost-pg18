@@ -6,9 +6,10 @@ interface HreflangAlternateLinksProps {
 
 /**
  * Renders the `<link rel="alternate" hreflang="...">` cluster into the document
- * head. Uses the lowercase `hreflang` attribute (HTML standard / Google's
+ * head. Used by SiteDocumentLayout so the links are in the first HTML byte.
+ * Uses the lowercase `hreflang` attribute (HTML standard / Google's
  * convention) instead of React's `hrefLang` prop, which React 19 emits verbatim
- * as camelCase. React 19 hoists these link tags to <head> during SSR.
+ * as camelCase.
  */
 export default function HreflangAlternateLinks({ alternates }: HreflangAlternateLinksProps) {
   if (alternates.length === 0) {

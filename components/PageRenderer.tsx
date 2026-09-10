@@ -2,15 +2,13 @@ import AnimationInitializer from '@/components/AnimationInitializer';
 import BodyClassApplier from '@/components/BodyClassApplier';
 import ContentHeightReporter from '@/components/ContentHeightReporter';
 import CustomCodeInjector from '@/components/CustomCodeInjector';
-import HreflangAlternateLinks from '@/components/HreflangAlternateLinks';
 import LayerRendererPublic from '@/components/LayerRendererPublic';
-import SliderInitializer from '@/components/SliderInitializer';
 import LightboxInitializer from '@/components/LightboxInitializer';
 import PasswordForm from '@/components/PasswordForm';
+import SliderInitializer from '@/components/SliderInitializer';
 import YcodeBadge from '@/components/YcodeBadge';
 import { unstable_cache } from 'next/cache';
 import { resolveCustomCodePlaceholders } from '@/lib/resolve-cms-variables';
-import { renderRootLayoutHeadCode } from '@/lib/parse-head-html';
 import { generateInitialAnimationCSS, type HiddenLayerInfo } from '@/lib/animation-utils';
 import { buildCustomFontsCss, buildFontClassesCss, fetchGoogleFontsCss, getCustomFontPreloads, getGoogleFontLinks } from '@/lib/font-utils';
 import type { FontPreload } from '@/lib/font-utils';
@@ -31,9 +29,6 @@ import { buildGlobalsMetaMap, buildGlobalsValueMap } from '@/lib/collection-fiel
 import { buildLocalizedPageUrls, type LocalizedDynamicSlug } from '@/lib/page-utils';
 import { getTranslatableKey, slimTranslations } from '@/lib/locale-runtime';
 import { getSlugTranslationsByLocale } from '@/lib/repositories/translationRepository';
-import { buildPageHreflangAlternatesForPage } from '@/lib/generate-page-metadata';
-import { getSiteBaseUrl } from '@/lib/url-utils';
-import type { HreflangAlternate } from '@/lib/hreflang-utils';
 import type { Layer, BackgroundsDesign, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder, PasswordProtectionContext, Translation } from '@/types';
 
 interface PageLinkRef { collection_item_id: string; page_id: string }
@@ -346,6 +341,7 @@ interface PageRendererProps {
   isPreview?: boolean;
   translations?: Record<string, any> | null;
   gaMeasurementId?: string | null;
+  /** Injected into `<head>` by SiteDocumentLayout. Kept for existing call sites. */
   globalCustomCodeHead?: string | null;
   globalCustomCodeBody?: string | null;
   ycodeBadge?: boolean;
@@ -388,7 +384,6 @@ export default async function PageRenderer({
   isPreview = false,
   translations,
   gaMeasurementId,
-  globalCustomCodeHead,
   globalCustomCodeBody,
   ycodeBadge = true,
   passwordProtection,
@@ -563,28 +558,16 @@ export default async function PageRenderer({
     }
   }
 
-  // Extract custom code from page settings and resolve placeholders for dynamic pages.
-  // Page head code is injected into <head> by the site layout on self-hosted;
-  // only resolve it here in cloud mode where the layout cannot read the URL.
-  const shouldInjectPageHead = process.env.SKIP_SETUP === 'true';
-  const rawPageCustomCodeHead = shouldInjectPageHead
-    ? (page.settings?.custom_code?.head || '')
-    : '';
+  // Extract custom body code from page settings and resolve placeholders for
+  // dynamic pages. Custom head code is injected by SiteDocumentLayout from
+  // the URL slug, so it is present in the real <head> of the SSR HTML.
   const rawPageCustomCodeBody = page.settings?.custom_code?.body || '';
-
-  const pageCustomCodeHead = shouldInjectPageHead && page.is_dynamic && collectionItem
-    ? await resolveCustomCodePlaceholders(rawPageCustomCodeHead, collectionItem, collectionFields, usePublishedData)
-    : rawPageCustomCodeHead;
 
   const pageCustomCodeBody = page.is_dynamic && collectionItem
     ? await resolveCustomCodePlaceholders(rawPageCustomCodeBody, collectionItem, collectionFields, usePublishedData)
     : rawPageCustomCodeBody;
 
   const { bodyClasses, childLayers: rawChildLayers } = extractBodyLayer(resolvedLayers);
-
-  // Language for <html lang> and the content wrapper. Falls back to the site's
-  // default locale so the document always advertises a language for a11y/SEO.
-  const resolvedLang = locale?.code || availableLocales.find((l) => l.is_default)?.code || undefined;
 
   // Generate CSS for initial animation states to prevent flickering
   const { css: initialAnimationCSS, hiddenLayerInfo } = generateInitialAnimationCSS(resolvedLayers);
@@ -738,43 +721,8 @@ export default async function PageRenderer({
       )
       : undefined;
 
-  // Build hreflang alternates for multilingual sites. Rendered as lowercase
-  // <link rel="alternate" hreflang> tags below (not via Next metadata, which
-  // emits camelCase hrefLang). Skipped for previews, error pages, and noindex
-  // pages, mirroring the sitemap's language cluster.
-  let hreflangAlternates: HreflangAlternate[] = [];
-  if (!isPreview && availableLocales.length > 1 && page.error_page === null && !page.settings?.seo?.noindex) {
-    try {
-      const globalCanonicalUrl = await getSettingByKey('global_canonical_url').catch(() => null);
-      const baseUrl = getSiteBaseUrl({
-        globalCanonicalUrl: typeof globalCanonicalUrl === 'string' ? globalCanonicalUrl : null,
-      });
-      if (baseUrl) {
-        hreflangAlternates = await buildPageHreflangAlternatesForPage(page, baseUrl, collectionItem);
-      }
-    } catch (error) {
-      console.error('[PageRenderer] Error building hreflang alternates:', error);
-    }
-  }
-
   return (
     <>
-      {/* Global head code fallback when layout skips it (SKIP_SETUP mode) */}
-      {process.env.SKIP_SETUP === 'true' && globalCustomCodeHead && (
-        renderRootLayoutHeadCode(globalCustomCodeHead, 'global-head')
-      )}
-
-      {/* Page-specific custom head code.
-          Self-hosted: the site layout injects this into the real <head>.
-          Cloud (SKIP_SETUP): the layout cannot read the request URL without
-          breaking ISR, so fall back to rendering here. */}
-      {shouldInjectPageHead && pageCustomCodeHead && (
-        renderRootLayoutHeadCode(pageCustomCodeHead, 'page-head')
-      )}
-
-      {/* hreflang alternates for multilingual sites (lowercase attribute) */}
-      <HreflangAlternateLinks alternates={hreflangAlternates} />
-
       {/* Preload the LCP image so the browser starts the fetch from <head>
           rather than waiting until the parser reaches the <img> tag. Pairs
           with the eager + fetchpriority=high props the renderer sets on the
@@ -906,23 +854,10 @@ export default async function PageRenderer({
         </>
       )}
 
-      {/* Apply body layer classes immediately to prevent FOUC */}
-      <script
-        dangerouslySetInnerHTML={{
-          __html: `document.body.className=document.body.className.replace(/\\bycode-body-applied\\b/g,'')+' ${(bodyClasses || 'bg-white').replace(/'/g, "\\'")} ycode-body-applied'`,
-        }}
-      />
-      <BodyClassApplier classes={bodyClasses || 'bg-white'} />
-
-      {/* Set <html lang> from the page locale. The root element is rendered by
-          the shared layout (which can't know the per-page locale), so apply it
-          here where the locale is resolved. */}
-      {resolvedLang && (
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `document.documentElement.lang=${JSON.stringify(resolvedLang)}`,
-          }}
-        />
+      {/* Error pages (401/404) can render inside a layout that resolved a
+          different URL's body classes. Replace them before the next paint. */}
+      {page.error_page != null && (
+        <BodyClassApplier classes={bodyClasses || 'bg-white'} />
       )}
 
       <div
@@ -930,7 +865,6 @@ export default async function PageRenderer({
         className="contents"
         data-layer-id="body"
         data-layer-type="div"
-        lang={resolvedLang}
       >
         <LayerRendererPublic
           // Strip editor/server-only layer fields (customName, open, restrictions,

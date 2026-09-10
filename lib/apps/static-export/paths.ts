@@ -22,3 +22,27 @@ export function computeOutputKey(page: Page, folders: PageFolder[]): string {
   if (!trimmed) return 'index.html'
   return `${trimmed}/index.html`
 }
+
+/**
+ * Inverse of `computeOutputKey`: the public pathname for an exported file.
+ * Error pages (`404.html`) have no public path and return `null`.
+ */
+export function pagePathFromOutputKey(outputKey: string): string | null {
+  if (/^\d+\.html$/.test(outputKey)) {
+    return null;
+  }
+
+  if (outputKey === 'index.html') {
+    return '/';
+  }
+
+  if (outputKey.endsWith('/index.html')) {
+    return `/${outputKey.slice(0, -'/index.html'.length)}`;
+  }
+
+  if (outputKey.endsWith('.html')) {
+    return `/${outputKey.slice(0, -'.html'.length)}`;
+  }
+
+  return `/${outputKey.replace(/\/+$/, '')}`;
+}
