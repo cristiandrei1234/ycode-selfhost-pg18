@@ -23,7 +23,7 @@ import { getItemsWithValues, getItemsWithValuesByIds } from '@/lib/repositories/
 import { getValuesByItemIds } from '@/lib/repositories/collectionItemValueRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { REF_PAGE_PREFIX, REF_COLLECTION_PREFIX, isCollectionItemKeyword, parseCollectionLinkValue } from '@/lib/link-utils';
-import { getClassesString, hasPasswordFormLayer, stripLayerFieldsForClient } from '@/lib/layer-utils';
+import { getClassesString, hasPasswordFormLayer } from '@/lib/layer-utils';
 import { SLIDER_BUTTON_RESET_CSS } from '@/lib/slider-constants';
 import { buildGlobalsMetaMap, buildGlobalsValueMap } from '@/lib/collection-field-utils';
 import { buildLocalizedPageUrls, type LocalizedDynamicSlug } from '@/lib/page-utils';
@@ -205,6 +205,15 @@ function stripSSROnlyData(layers: Layer[]): Layer[] {
     delete stripped._collectionItemValues;
     delete stripped._collectionItemSlug;
     delete stripped._layerDataMap;
+
+    // Editor/server-only fields the public renderer never reads: `customName`
+    // (tree label), `open` (tree expand state), `restrictions` (copy/delete/move/
+    // editText guards) and `_originalLayerId` (server-side translation-lookup
+    // marker, consumed before this point).
+    delete stripped.customName;
+    delete stripped.open;
+    delete stripped.restrictions;
+    delete (stripped as { _originalLayerId?: string })._originalLayerId;
 
     // Builder-only style resolution inputs. The flat `classes` string is the
     // already-resolved output, so the public renderer never reads these.
@@ -867,10 +876,7 @@ export default async function PageRenderer({
         data-layer-type="div"
       >
         <LayerRendererPublic
-          // Strip editor/server-only layer fields (customName, open, restrictions,
-          // _originalLayerId) before serialization — the public renderer never
-          // reads them, so this trims the RSC/hydration payload with no render change.
-          layers={stripLayerFieldsForClient(childLayers)}
+          layers={childLayers}
           isPublished={page.is_published}
           pageId={page.id}
           pageCollectionItemId={collectionItem?.id}

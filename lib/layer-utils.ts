@@ -143,34 +143,6 @@ export function stripUIProperties(layers: Layer[]): Layer[] {
 }
 
 /**
- * Editor/server-only layer fields that the public renderer never reads.
- * `customName` (tree label), `open` (tree expand state), `restrictions`
- * (copy/delete/move/editText guards) and `_originalLayerId` (server-side
- * translation-lookup marker) are all consumed only in the builder or during
- * server-side resolution — dropping them from the client tree shrinks the
- * serialized RSC/hydration payload with no render impact.
- */
-const CLIENT_STRIPPED_LAYER_FIELDS = ['customName', 'open', 'restrictions', '_originalLayerId'] as const;
-
-/**
- * Recursively strip editor/server-only fields from a layer tree before it is
- * serialized to the public client renderer. Keeps the rendered output identical
- * while removing per-node data the browser never uses.
- */
-export function stripLayerFieldsForClient(layers: Layer[]): Layer[] {
-  return layers.map(layer => {
-    const cleaned = { ...layer } as Layer & Record<string, unknown>;
-    for (const field of CLIENT_STRIPPED_LAYER_FIELDS) {
-      delete cleaned[field];
-    }
-    if (layer.children && layer.children.length > 0) {
-      cleaned.children = stripLayerFieldsForClient(layer.children);
-    }
-    return cleaned;
-  });
-}
-
-/**
  * Check if a value is a FieldVariable
  */
 export function isFieldVariable(value: any): value is FieldVariable {
