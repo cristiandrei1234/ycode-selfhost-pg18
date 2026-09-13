@@ -10,22 +10,16 @@
 
 import { layerToHtml, buildAnchorMap } from '@/lib/page-fetcher'
 import type { PageData } from '@/lib/page-fetcher'
-import { getClassesString } from '@/lib/layer-utils'
+import type { FontPreload } from '@/lib/font-utils'
+import { htmlDirFromLang } from '@/lib/html-lang'
+import type { HreflangAlternate } from '@/lib/hreflang-utils'
+import { SLIDER_BUTTON_RESET_CSS } from '@/lib/slider-constants'
 import { getEffectiveApplyStyle } from '@/lib/animation-utils'
+import { buildYcodeHtmlComments } from '@/lib/ycode-html-comment'
 
 import type { Layer, Page, PageFolder } from '@/types'
 
-/**
- * Extract the class string from the synthetic `body` layer so the exporter
- * can apply it to the real `<body>` element. The editor's Canvas does the
- * same thing — without it, the user's body background / text color / fonts
- * are silently dropped from the export.
- */
-export function getBodyClasses(layers: Layer[] | null | undefined): string {
-  if (!layers || layers.length === 0) return ''
-  const bodyLayer = layers.find((l) => l.id === 'body' || l.name === 'body')
-  return bodyLayer ? getClassesString(bodyLayer) : ''
-}
+export { getBodyClasses } from '@/lib/body-classes'
 
 // =============================================================================
 // Render context + body rendering
@@ -179,12 +173,33 @@ const SLIDER_BOOT_SCRIPT = `
     requestAnimationFrame(syncAll);
   }
 
+  // Resolve a responsive number (number or per-breakpoint object) using the
+  // desktop-first fallback chain, mirroring lib/slider-utils.ts.
+  var BP_FALLBACKS = { desktop: ['desktop'], tablet: ['tablet', 'desktop'], mobile: ['mobile', 'tablet', 'desktop'] };
+  function resolveResp(value, bp, fallback) {
+    if (value == null) return fallback;
+    if (typeof value === 'number') return value;
+    var chain = BP_FALLBACKS[bp];
+    for (var i = 0; i < chain.length; i++) {
+      if (typeof value[chain[i]] === 'number') return value[chain[i]];
+    }
+    return fallback;
+  }
+
   function buildConfig(s) {
+    // Per view 1 defers to each slide's own CSS width ('auto'); >1 forces a count.
+    var perViewCount = function (bp) { return resolveResp(s.groupSlide, bp, 1); };
+    var perView = function (bp) { var c = perViewCount(bp); return c > 1 ? c : 'auto'; };
+    var perGroup = function (bp) { return Math.min(resolveResp(s.slidesPerGroup, bp, 1), perViewCount(bp)); };
     var config = {
-      slidesPerView: 'auto',
-      slidesPerGroup: s.slidesPerGroup || 1,
+      slidesPerView: perView('mobile'),
+      slidesPerGroup: perGroup('mobile'),
       centeredSlides: !!s.centered,
       speed: Math.round((parseFloat(s.duration) || 0.5) * 1000),
+      breakpoints: {
+        768: { slidesPerView: perView('tablet'), slidesPerGroup: perGroup('tablet') },
+        1024: { slidesPerView: perView('desktop'), slidesPerGroup: perGroup('desktop') },
+      },
     };
     if (SPECIAL_EFFECTS[s.animationEffect]) config.effect = s.animationEffect;
     if (s.loop === 'loop') config.loop = true;
@@ -621,6 +636,8 @@ export interface BuildHtmlInput {
   colorVariablesCss: string | null
   /** Inlined @font-face + font class CSS for Google and custom fonts. */
   fontsCss?: string | null
+  /** Custom font binaries to hint via `<link rel="preload" as="font">`. */
+  fontPreloads?: FontPreload[]
   includeSwiper: boolean
   interactions: ExportedInteraction[]
   /** Site-wide custom code from Settings → General (head + body slots). */
@@ -632,6 +649,14 @@ export interface BuildHtmlInput {
    */
   pageCustomCodeHead?: string | null
   pageCustomCodeBody?: string | null
+  /** ISO timestamp of the last publish, used for the HTML source stamp. */
+  publishedAt?: string | null
+  /** Absolute canonical URL for this export file. Omitted without a site base URL. */
+  canonicalUrl?: string | null
+  /** Absolute `og:url`. Same value as canonical when present. */
+  ogUrl?: string | null
+  /** Locale alternate cluster. Empty for single-locale / noindex / error pages. */
+  hreflang?: HreflangAlternate[]
 }
 
 export function buildDocument({
@@ -643,12 +668,17 @@ export function buildDocument({
   publishedCss,
   colorVariablesCss,
   fontsCss,
+  fontPreloads,
   includeSwiper,
   interactions,
   globalCustomCodeHead,
   globalCustomCodeBody,
   pageCustomCodeHead,
   pageCustomCodeBody,
+  publishedAt,
+  canonicalUrl,
+  ogUrl,
+  hreflang = [],
 }: BuildHtmlInput): string {
   const seo = extractSeo(page)
   const title = seo.title || page.name
@@ -659,12 +689,24 @@ export function buildDocument({
   const head: string[] = []
   head.push('<meta charset="UTF-8" />')
   head.push('<meta name="viewport" content="width=device-width, initial-scale=1.0" />')
+  head.push('<meta name="generator" content="Ycode" />')
   head.push(`<title>${escapeHtml(title)}</title>`)
   if (description) {
     head.push(`<meta name="description" content="${escapeHtml(description)}" />`)
     head.push(`<meta property="og:description" content="${escapeHtml(description)}" />`)
   }
+  if (canonicalUrl) {
+    head.push(`<link rel="canonical" href="${escapeHtml(canonicalUrl)}" />`)
+  }
+  for (const alt of hreflang) {
+    head.push(
+      `<link rel="alternate" hreflang="${escapeHtml(alt.hreflang)}" href="${escapeHtml(alt.href)}" />`,
+    )
+  }
   head.push(`<meta property="og:title" content="${escapeHtml(title)}" />`)
+  if (ogUrl) {
+    head.push(`<meta property="og:url" content="${escapeHtml(ogUrl)}" />`)
+  }
   head.push(`<meta property="og:type" content="website" />`)
   if (ogImage) {
     head.push(`<meta property="og:image" content="${escapeHtml(ogImage)}" />`)
@@ -673,11 +715,21 @@ export function buildDocument({
   }
   if (noindex) head.push('<meta name="robots" content="noindex" />')
 
+  // Preload uploaded custom font binaries so the browser fetches them from
+  // <head> instead of after CSS parsing. `crossorigin` is required — fonts are
+  // always fetched in CORS mode.
+  for (const font of fontPreloads ?? []) {
+    head.push(
+      `<link rel="preload" as="font" href="${escapeHtml(font.href)}" type="${escapeHtml(font.type)}" crossorigin="anonymous" />`,
+    )
+  }
+
   const css = [fontsCss, colorVariablesCss, publishedCss].filter(Boolean).join('\n')
   if (css) head.push(`<style>${css}</style>`)
 
   if (includeSwiper) {
     head.push(`<link rel="stylesheet" href="${SWIPER_CSS_PATH}" />`)
+    head.push(`<style>${SLIDER_BUTTON_RESET_CSS}</style>`)
   }
 
   // Custom head code: global first (site-wide), then page-specific. Emitted
@@ -720,7 +772,8 @@ export function buildDocument({
 
   return [
     '<!DOCTYPE html>',
-    `<html lang="${escapeHtml(lang)}">`,
+    ...buildYcodeHtmlComments(publishedAt).split('\n'),
+    `<html lang="${escapeHtml(lang)}" dir="${htmlDirFromLang(lang)}">`,
     '<head>',
     ...head.map((line) => indent + line),
     '</head>',

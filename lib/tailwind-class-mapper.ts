@@ -191,8 +191,8 @@ function formatMeasurementClass(
     return `${prefix}-[${value}]`;
   }
 
-  // For values starting with a digit but not caught above
-  if (value.match(/^\d/)) {
+  // For values starting with a digit or leading decimal point (e.g. ".875rem")
+  if (value.match(/^\.?\d/)) {
     return `${prefix}-[${value}]`;
   }
 
@@ -240,6 +240,19 @@ function ensureLengthUnit(value: string): string {
 }
 
 /**
+ * Normalizes a grid span value to a bare Tailwind suffix.
+ * Accepts CSS-native shorthand ("span 3") as well as bare values ("3", "full", "auto").
+ */
+function normalizeGridSpanValue(value: string): string {
+  return value.replace(/^span\s+/i, '').trim();
+}
+
+/** Tailwind `display` utility values the editor supports as bare classes. */
+const DISPLAY_VALUES = new Set([
+  'block', 'inline-block', 'inline', 'flex', 'inline-flex', 'grid', 'inline-grid', 'hidden',
+]);
+
+/**
  * Map of Tailwind class prefixes to their property names
  * Used for conflict detection and removal
  */
@@ -250,6 +263,7 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   flexWrap: /^flex-(wrap|wrap-reverse|nowrap)$/,
   justifyContent: /^justify-(start|end|center|between|around|evenly|stretch)$/,
   alignItems: /^items-(start|end|center|baseline|stretch)$/,
+  alignSelf: /^self-(auto|start|end|center|baseline|stretch)$/,
   alignContent: /^content-(start|end|center|between|around|evenly|stretch)$/,
   gap: /^gap-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
   columnGap: /^gap-x-(\[.+\]|\d+|px|0\.5|1\.5|2\.5|3\.5)$/,
@@ -274,13 +288,16 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   marginLeft: /^ml-(\[.+\]|\d+|px|auto|0\.5|1\.5|2\.5|3\.5)$/,
 
   // Sizing
-  width: /^w-(\[.+\]|\d+\/\d+|\d+|px|auto|full|screen|min|max|fit)$/,
-  height: /^h-(\[.+\]|\d+\/\d+|\d+|px|auto|full|screen|min|max|fit)$/,
-  minWidth: /^min-w-(\[.+\]|\d+|px|full|min|max|fit)$/,
-  minHeight: /^min-h-(\[.+\]|\d+|px|full|screen|min|max|fit)$/,
-  maxWidth: /^max-w-(\[.+\]|none|xs|sm|md|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|full|min|max|fit|prose|screen-sm|screen-md|screen-lg|screen-xl|screen-2xl)$/,
-  maxHeight: /^max-h-(\[.+\]|\d+|px|full|screen|min|max|fit)$/,
-  overflow: /^overflow-(visible|hidden|clip|scroll|auto|x-visible|x-hidden|x-clip|x-scroll|x-auto|y-visible|y-hidden|y-clip|y-scroll|y-auto)$/,
+  // Match any value after the prefix (including partial keywords typed live,
+  // e.g. h-a, h-au, h-aut) so in-progress classes are replaced instead of
+  // accumulating. Each prefix is exclusive to its property in Tailwind.
+  width: /^w-.+$/,
+  height: /^h-.+$/,
+  minWidth: /^min-w-.+$/,
+  minHeight: /^min-h-.+$/,
+  maxWidth: /^max-w-.+$/,
+  maxHeight: /^max-h-.+$/,
+  overflow: /^(truncate|overflow-(visible|hidden|clip|scroll|auto|x-visible|x-hidden|x-clip|x-scroll|x-auto|y-visible|y-hidden|y-clip|y-scroll|y-auto))$/,
   aspectRatio: /^aspect-(\[.+\]|auto|square|video)$/,
   objectFit: /^object-(contain|cover|fill|none|scale-down)$/,
   objectPosition: /^object-(left-top|right-top|left-bottom|right-bottom|top|bottom|left|right|center|\[.+\])$/,
@@ -290,13 +307,14 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   // Typography
   fontFamily: /^font-(sans|serif|mono|\[.+\])$/,
   // Updated to match partial arbitrary values like text-n, text-no, text-non (not just complete text-[10rem])
-  // Excludes text-align values and text-wrap utilities (wrap, nowrap, balance, pretty)
-  fontSize: /^text-(?!(?:left|center|right|justify|start|end|wrap|nowrap|balance|pretty)(?:\s|$)).+$/,
+  // Excludes text-align values, text-wrap utilities, and text-shadow
+  fontSize: /^text-(?!(?:left|center|right|justify|start|end|wrap|nowrap|balance|pretty|shadow)(?:-|\s|$)).+$/,
   fontWeight: /^font-(thin|extralight|light|normal|medium|semibold|bold|extrabold|black|\[.+\])$/,
   lineHeight: /^leading-(none|tight|snug|normal|relaxed|loose|\d+|\[.+\])$/,
   letterSpacing: /^tracking-(tighter|tight|normal|wide|wider|widest|\[.+\]|.+)$/,
   textAlign: /^text-(left|center|right|justify|start|end)$/,
   textWrap: /^text-(wrap|nowrap|balance|pretty)$/,
+  fontVariantNumeric: /^(normal-nums|ordinal|slashed-zero|lining-nums|oldstyle-nums|proportional-nums|tabular-nums|diagonal-fractions|stacked-fractions)$/,
   textTransform: /^(uppercase|lowercase|capitalize|normal-case)$/,
   textDecoration: /^(underline|overline|line-through|no-underline)$/,
   textDecorationColor: /^decoration-\[.+\](\/\d+)?$/,
@@ -306,8 +324,9 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   // Updated to match partial arbitrary values like text-r, text-re, text-red (not just complete text-[#FF0000])
   // Excludes fontSize named values, text-align values, and text-wrap utilities
   // Includes opacity modifier: text-[#cc8d8d]/59
-  color: /^text-(?!(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl|left|center|right|justify|start|end|wrap|nowrap|balance|pretty)(?:\s|$)).+(\/\d+)?$/,
+  color: /^text-(?!(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl|left|center|right|justify|start|end|wrap|nowrap|balance|pretty|shadow)(?:-|\s|$)).+(\/\d+)?$/,
   placeholderColor: /^placeholder:text-.+(\/\d+)?$/,
+  textShadow: /^text-shadow(-none|-2xs|-xs|-sm|-md|-lg|-\[.+\])?$/,
 
   // Backgrounds
   backgroundColor: /^bg-(?!(?:auto|cover|contain|bottom|center|left|left-bottom|left-top|right|right-bottom|right-top|top|repeat|no-repeat|repeat-x|repeat-y|repeat-round|repeat-space|none|gradient-to-t|gradient-to-tr|gradient-to-r|gradient-to-br|gradient-to-b|gradient-to-bl|gradient-to-l|gradient-to-tl)$)((\w+)(-\d+)?|\[.+\](?:\/\d+)?)$/,
@@ -348,6 +367,7 @@ const CLASS_PROPERTY_MAP: Record<string, RegExp> = {
   blur: /^blur(-none|-sm|-md|-lg|-xl|-2xl|-3xl|-\[.+\])?$/,
   backdropBlur: /^backdrop-blur(-none|-sm|-md|-lg|-xl|-2xl|-3xl|-\[.+\])?$/,
   mixBlendMode: /^mix-blend-(normal|multiply|screen|overlay|darken|lighten|color-dodge|color-burn|hard-light|soft-light|difference|exclusion|hue|saturation|color|luminosity)$/,
+  cursor: /^cursor-.+$/,
 
   // Positioning
   position: /^(static|fixed|absolute|relative|sticky)$/,
@@ -568,6 +588,19 @@ export function removeConflictingClasses(
       }
     }
 
+    // Special handling for font-[...] arbitrary values
+    // Distinguish fontWeight (numeric, e.g. font-[700]) from fontFamily
+    // (non-numeric, e.g. font-[Gelasio_Regular]) — both match each other's
+    // pattern via \[.+\], so keep the mismatched one instead of removing it.
+    if (baseClass.startsWith('font-[')) {
+      const value = extractArbitraryValue(baseClass);
+      if (value) {
+        const isNumeric = /^\d/.test(value);
+        if (property === 'fontWeight' && !isNumeric) return true;
+        if (property === 'fontFamily' && isNumeric) return true;
+      }
+    }
+
     // Background-image CSS variable classes are always backgroundImage
     if (BG_IMG_VAR_RE.test(baseClass)) {
       if (property === 'backgroundColor') return true;
@@ -670,8 +703,12 @@ export function propertyToClass(
   // Layout conversions
   if (category === 'layout') {
     switch (property) {
-      case 'display':
-        return value.toLowerCase();
+      case 'display': {
+        // Map CSS synonyms (e.g. "none") to Tailwind's canonical value and
+        // ignore unsupported values so we never emit an invalid class like "none".
+        const normalized = value.toLowerCase() === 'none' ? 'hidden' : value.toLowerCase();
+        return DISPLAY_VALUES.has(normalized) ? normalized : null;
+      }
       case 'flexDirection':
         if (value === 'row') return 'flex-row';
         if (value === 'column') return 'flex-col';
@@ -699,6 +736,13 @@ export function propertyToClass(
           'flex-end': 'end',
         };
         return `items-${itemsMap[value] || value}`;
+      }
+      case 'alignSelf': {
+        const selfMap: Record<string, string> = {
+          'flex-start': 'start',
+          'flex-end': 'end',
+        };
+        return `self-${selfMap[value] || value}`;
       }
       case 'alignContent': {
         const contentMap: Record<string, string> = {
@@ -739,10 +783,10 @@ export function propertyToClass(
         // Google/custom fonts: replace spaces with underscores for Tailwind arbitrary values
         return `font-[${value.replace(/\s+/g, '_')}]`;
       case 'lineHeight':
-        return value.match(/^\d/) ? `leading-[${value}]` : `leading-${value}`;
+        return value.match(/^\.?\d/) ? `leading-[${value}]` : `leading-${value}`;
       case 'letterSpacing':
-        // Check if value starts with digit/minus and doesn't already have a unit
-        if (value.match(/^-?\d/)) {
+        // Check if value starts with digit/minus/decimal and doesn't already have a unit
+        if (value.match(/^-?\.?\d/)) {
           // Check if value already has a unit (ends with letters or %)
           const hasUnit = /[a-z%]$/i.test(value);
           return hasUnit ? `tracking-[${value}]` : `tracking-[${value}em]`;
@@ -750,6 +794,10 @@ export function propertyToClass(
         return `tracking-${value}`;
       case 'textAlign':
         return `text-${value}`;
+      case 'textWrap':
+        return `text-${value}`;
+      case 'fontVariantNumeric':
+        return value === 'normal' ? 'normal-nums' : value;
       case 'textTransform':
         if (value === 'none') return 'normal-case';
         return value; // uppercase, lowercase, capitalize
@@ -780,6 +828,12 @@ export function propertyToClass(
         if (value === 'none') return 'line-clamp-none';
         if (/^\d+$/.test(value)) return `line-clamp-${value}`;
         return `line-clamp-[${value}]`;
+      case 'textShadow':
+        if (value === 'none') return 'text-shadow-none';
+        if (['2xs', 'xs', 'sm', 'md', 'lg'].includes(value)) {
+          return `text-shadow-${value}`;
+        }
+        return `text-shadow-[${value.replace(/\s+/g, '_')}]`;
       case 'color':
         // Check if value is a gradient (linear-gradient or radial-gradient)
         if (value.includes('gradient(')) {
@@ -859,12 +913,20 @@ export function propertyToClass(
       // Special case: 100% → full
       if (value === '100%') return `${prefix}-full`;
 
+      // Tailwind fraction values (e.g. "1/2" → w-1/2); n/n equals 100% → full
+      const fractionMatch = value.match(/^(\d+)\/([1-9]\d*)$/);
+      if (fractionMatch) {
+        if (fractionMatch[1] === fractionMatch[2]) return `${prefix}-full`;
+        return `${prefix}-${value}`;
+      }
+
       // Use abstracted helper with allowed named values
       return formatMeasurementClass(value, prefix, ['auto', 'full', 'screen', 'min', 'max', 'fit', 'none']);
     }
 
     // Overflow
     if (property === 'overflow') {
+      if (value === 'ellipsis') return 'truncate'; // overflow-hidden + text-ellipsis + whitespace-nowrap
       return `overflow-${value}`; // overflow-visible, overflow-hidden, overflow-scroll, overflow-auto
     }
 
@@ -886,12 +948,14 @@ export function propertyToClass(
 
     // Grid Column Span
     if (property === 'gridColumnSpan') {
-      return value === 'full' ? 'col-span-full' : `col-span-${value}`;
+      const span = normalizeGridSpanValue(value);
+      return span === 'full' ? 'col-span-full' : `col-span-${span}`;
     }
 
     // Grid Row Span
     if (property === 'gridRowSpan') {
-      return value === 'full' ? 'row-span-full' : `row-span-${value}`;
+      const span = normalizeGridSpanValue(value);
+      return span === 'full' ? 'row-span-full' : `row-span-${span}`;
     }
   }
 
@@ -1054,6 +1118,8 @@ export function propertyToClass(
       case 'mixBlendMode':
         if (value === 'normal') return '';
         return `mix-blend-${value}`;
+      case 'cursor':
+        return `cursor-${value}`;
     }
   }
 
@@ -1182,6 +1248,10 @@ export function getAffectedProperties(className: string): string[] {
     if (baseClass === 'bg-clip-text') properties.push('color');
     return properties;
   }
+  if (baseClass.startsWith('text-shadow')) {
+    properties.push('textShadow');
+    return properties;
+  }
   if (baseClass === 'text-transparent') {
     properties.push('color');
     return properties;
@@ -1220,6 +1290,19 @@ export function getAffectedProperties(className: string): string[] {
         properties.push('fontSize');
         return properties;
       }
+    }
+  }
+
+  // Special handling for font-[...] arbitrary values
+  // Must distinguish between fontWeight (numeric, e.g. font-[700]) and
+  // fontFamily (non-numeric, e.g. font-[Gelasio_Regular]). Both share the
+  // font-[…] namespace, so without this an arbitrary weight would be treated
+  // as a family (and vice versa) and strip its sibling typography class.
+  if (baseClass.startsWith('font-[')) {
+    const value = extractArbitraryValue(baseClass);
+    if (value) {
+      properties.push(/^\d/.test(value) ? 'fontWeight' : 'fontFamily');
+      return properties;
     }
   }
 
@@ -1411,6 +1494,14 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
       }
     }
 
+    // Align Self
+    if (cls.startsWith('self-')) {
+      const value = cls.replace('self-', '');
+      if (['auto', 'start', 'end', 'center', 'baseline', 'stretch'].includes(value)) {
+        design.layout!.alignSelf = value;
+      }
+    }
+
     // Gap
     if (cls.startsWith('gap-[')) {
       const value = extractArbitraryValue(cls);
@@ -1480,6 +1571,17 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     if (cls === 'text-right') design.typography!.textAlign = 'right';
     if (cls === 'text-justify') design.typography!.textAlign = 'justify';
 
+    // Text Wrap
+    if (cls === 'text-wrap') design.typography!.textWrap = 'wrap';
+    if (cls === 'text-nowrap') design.typography!.textWrap = 'nowrap';
+    if (cls === 'text-balance') design.typography!.textWrap = 'balance';
+    if (cls === 'text-pretty') design.typography!.textWrap = 'pretty';
+
+    // Font Variant Numeric
+    if (CLASS_PROPERTY_MAP.fontVariantNumeric.test(cls)) {
+      design.typography!.fontVariantNumeric = cls === 'normal-nums' ? 'normal' : cls;
+    }
+
     // Text Transform
     if (cls === 'uppercase') design.typography!.textTransform = 'uppercase';
     if (cls === 'lowercase') design.typography!.textTransform = 'lowercase';
@@ -1521,6 +1623,17 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     } else if (cls.startsWith('line-clamp-[')) {
       const value = extractArbitraryValue(cls);
       if (value) design.typography!.lineClamp = value;
+    }
+
+    // Text Shadow
+    if (cls.startsWith('text-shadow-[')) {
+      const value = extractArbitraryValue(cls);
+      if (value) design.typography!.textShadow = value;
+    } else if (cls === 'text-shadow-none') {
+      design.typography!.textShadow = 'none';
+    } else if (cls.match(/^text-shadow-(2xs|xs|sm|md|lg)$/)) {
+      const match = cls.match(/^text-shadow-(.+)$/);
+      if (match) design.typography!.textShadow = match[1];
     }
 
     // Line Height
@@ -1700,7 +1813,9 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     }
 
     // Overflow
-    if (cls.startsWith('overflow-')) {
+    if (cls === 'truncate') {
+      design.sizing!.overflow = 'ellipsis';
+    } else if (cls.startsWith('overflow-')) {
       const match = cls.match(/^overflow-(visible|hidden|clip|scroll|auto|x-visible|x-hidden|x-clip|x-scroll|x-auto|y-visible|y-hidden|y-clip|y-scroll|y-auto)$/);
       if (match) {
         design.sizing!.overflow = match[1];
@@ -1859,6 +1974,12 @@ export function classesToDesign(classes: string | string[]): Layer['design'] {
     if (cls.startsWith('mix-blend-')) {
       const match = cls.match(/^mix-blend-(.+)$/);
       if (match) design.effects!.mixBlendMode = match[1];
+    }
+
+    // Cursor
+    if (cls.startsWith('cursor-')) {
+      const value = cls.slice('cursor-'.length);
+      if (value) design.effects!.cursor = value;
     }
 
     // ===== POSITIONING =====
@@ -2157,6 +2278,10 @@ function isImageValue(value: string): boolean {
 function shouldIncludeClassForProperty(className: string, property: string, pattern: RegExp): boolean {
   // Strip breakpoint and state prefixes for helper class detection
   const baseClass = className.replace(/^(max-lg:|max-md:|lg:|md:)?(hover:|focus:|active:|disabled:|visited:|current:)?/, '');
+
+  if (baseClass.startsWith('text-shadow')) {
+    return property === 'textShadow';
+  }
 
   // Special handling for text color property
   // Include gradient-related classes (bg-[gradient], text-transparent) but NOT bg-clip-text

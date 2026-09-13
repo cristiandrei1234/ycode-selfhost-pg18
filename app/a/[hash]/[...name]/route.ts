@@ -38,6 +38,18 @@ function parseTransformParams(searchParams: URLSearchParams) {
   };
 }
 
+/**
+ * Whether a mime type can be safely resized in-process. SVGs are vector (no
+ * point) and GIFs would lose animation when flattened — both fall through to
+ * the original passthrough instead.
+ */
+function isResizableBitmap(mimeType: string | null | undefined): boolean {
+  if (!mimeType || !mimeType.startsWith('image/')) return false;
+  if (mimeType === 'image/svg+xml') return false;
+  if (mimeType === 'image/gif') return false;
+  return true;
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ hash: string; name: string[] }> }
@@ -96,30 +108,56 @@ export async function GET(
     }
 
     const transform = parseTransformParams(url.searchParams);
-    const canResize = transform && isImage;
-
-    if (canResize) {
+    // Resize the fetched original in-process with sharp. GIFs are excluded via
+    // isResizableBitmap — Sharp flattens animated frames into a single static
+    // image, so they fall through and stream as raw bytes below.
+    if (transform && isImage && isResizableBitmap(asset.mime_type)) {
       const buffer = Buffer.from(await response.arrayBuffer());
-      let pipeline = sharp(buffer);
 
-      if (transform.width || transform.height) {
-        pipeline = pipeline.resize(transform.width, transform.height, {
-          fit: 'cover',
-          withoutEnlargement: true,
+      // Preserve AVIF on output (already highly compressed); re-encoding to WebP
+      // would inflate size and lose quality.
+      const isAvif = asset.mime_type === 'image/avif';
+
+      try {
+        let pipeline = sharp(buffer);
+
+        if (transform.width || transform.height) {
+          // `fit: 'inside'` scales down within the requested bounds while
+          // preserving aspect ratio — it never crops. Cropping is a display
+          // concern handled by CSS `object-fit` on the rendered element; using
+          // `fit: 'cover'` here crops the sides whenever both dimensions are
+          // present, silently fighting the element's own `object-fit`.
+          pipeline = pipeline.resize(transform.width, transform.height, {
+            fit: 'inside',
+            withoutEnlargement: true,
+          });
+        }
+
+        pipeline = isAvif
+          ? pipeline.avif({ quality: transform.quality })
+          : pipeline.webp({ quality: transform.quality });
+
+        const resized = await pipeline.toBuffer();
+
+        return new Response(new Uint8Array(resized), {
+          status: 200,
+          headers: {
+            'Content-Type': isAvif ? 'image/avif' : 'image/webp',
+            'Content-Length': resized.length.toString(),
+          },
+        });
+      } catch {
+        // Sharp's bundled decoder can't decode some bitstreams (e.g. 10/12-bit
+        // AVIF, which browsers still render). Since the decode failure blocks
+        // any re-encode, serve the original bytes untouched rather than failing.
+        return new Response(new Uint8Array(buffer), {
+          status: 200,
+          headers: {
+            'Content-Type': asset.mime_type || 'application/octet-stream',
+            'Content-Length': buffer.length.toString(),
+          },
         });
       }
-
-      pipeline = pipeline.webp({ quality: transform.quality });
-
-      const resized = await pipeline.toBuffer();
-
-      return new Response(new Uint8Array(resized), {
-        status: 200,
-        headers: {
-          'Content-Type': 'image/webp',
-          'Content-Length': resized.length.toString(),
-        },
-      });
     }
 
     // Mirror the upstream status (206 for partial content) and range headers so

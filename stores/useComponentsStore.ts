@@ -152,6 +152,13 @@ interface ComponentsActions {
   // Data loading
   setComponents: (components: Component[]) => void;
   loadComponents: () => Promise<void>;
+  /**
+   * Apply an authoritative component snapshot from the server (e.g. after the AI
+   * agent edits it). Replaces the record in `components` and rebuilds the
+   * component's drafts from its variants so the open canvas reflects the change
+   * without a manual reload. Marks the drafts clean so it doesn't trigger a save.
+   */
+  applyServerComponent: (component: Component) => void;
 
   // CRUD operations
   createComponent: (name: string, layers: Layer[]) => Promise<Component | null>;
@@ -256,6 +263,35 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
 
     // Set components (used by unified init)
     setComponents: (components) => set({ components }),
+
+    // Apply an authoritative server snapshot (e.g. after AI edits a component).
+    applyServerComponent: (component) => {
+      const variants = component.variants && component.variants.length > 0
+        ? component.variants
+        : [{ id: generateId('cmpvar'), name: 'Default', layers: component.layers ?? [] }];
+
+      // Rebuild the per-variant drafts so the open component canvas re-renders
+      // with the AI's changes. Deep-clone so later local edits don't mutate the
+      // stored component record.
+      const variantDrafts: Record<string, Layer[]> = {};
+      for (const variant of variants) {
+        variantDrafts[variant.id] = JSON.parse(JSON.stringify(variant.layers ?? []));
+      }
+
+      set((state) => ({
+        components: state.components.some((c) => c.id === component.id)
+          ? state.components.map((c) => (c.id === component.id ? component : c))
+          : [component, ...state.components],
+        componentDrafts: {
+          ...state.componentDrafts,
+          [component.id]: variantDrafts,
+        },
+        componentDraftDirty: {
+          ...state.componentDraftDirty,
+          [component.id]: false,
+        },
+      }));
+    },
 
     // Load all components
     loadComponents: async () => {
@@ -528,14 +564,17 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
         for (const variant of variants) {
           variantDrafts[variant.id] = JSON.parse(JSON.stringify(variant.layers ?? []));
         }
-        // Layers used for version tracking — track the primary variant for now.
-        const primaryLayers = variantDrafts[variants[0].id] ?? [];
 
-        // Mark entity as initializing BEFORE updating store to prevent false change detection
+        // Mark each variant as initializing BEFORE updating store to prevent
+        // false change detection. Undo/redo is scoped per variant.
         try {
           const { markEntityInitializing, updatePreviousState } = await import('@/hooks/use-undo-redo');
-          markEntityInitializing('component', componentId);
-          updatePreviousState('component', componentId, primaryLayers);
+          const { componentVersionEntityId } = await import('@/lib/version-tracking');
+          for (const variant of variants) {
+            const versionId = componentVersionEntityId(componentId, variant.id);
+            markEntityInitializing('component', versionId);
+            updatePreviousState('component', versionId, variantDrafts[variant.id]);
+          }
         } catch (err) {
           console.error('Failed to mark component as initializing:', err);
         }
@@ -551,9 +590,15 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
           },
         }));
 
-        // Initialize version tracking with loaded state
-        import('@/lib/version-tracking').then(({ initializeVersionTracking }) => {
-          initializeVersionTracking('component', componentId, primaryLayers);
+        // Initialize version tracking with loaded state (per variant)
+        import('@/lib/version-tracking').then(({ initializeVersionTracking, componentVersionEntityId }) => {
+          for (const variant of variants) {
+            initializeVersionTracking(
+              'component',
+              componentVersionEntityId(componentId, variant.id),
+              variantDrafts[variant.id]
+            );
+          }
         }).catch((err) => {
           console.error('Failed to initialize component version tracking:', err);
         });
@@ -673,9 +718,17 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
             isSaving: false,
           }));
 
-          // Record version for undo/redo only if variants match what we saved.
-          import('@/lib/version-tracking').then(({ recordVersionViaApi }) => {
-            recordVersionViaApi('component', componentId, layersBeingSaved);
+          // Record a version per variant for undo/redo. Each variant has its
+          // own history; unchanged variants produce an empty patch and are
+          // skipped inside recordVersionViaApi.
+          import('@/lib/version-tracking').then(({ recordVersionViaApi, componentVersionEntityId }) => {
+            for (const variant of variantsBeingSaved) {
+              recordVersionViaApi(
+                'component',
+                componentVersionEntityId(componentId, variant.id),
+                variant.layers
+              );
+            }
           }).catch((err) => {
             console.error('Failed to record component version:', err);
           });
@@ -838,8 +891,11 @@ export const useComponentsStore = create<ComponentsStore>((set, get) => {
       const layerToCopy = findLayerById(layers, layerId);
       if (!layerToCopy) return null;
 
+      // Regenerate IDs so the component's internal layers don't collide with
+      // the instance layer that keeps the original id in the parent tree.
+      const regeneratedLayer = regenerateIdsWithInteractionRemapping(layerToCopy);
       // Strip CMS bindings that won't be valid inside a standalone component
-      const cleanedLayers = cleanLayersForComponentCreation([layerToCopy]);
+      const cleanedLayers = cleanLayersForComponentCreation([regeneratedLayer]);
       const newComponent = await createComponentViaApi(componentName, cleanedLayers);
       if (!newComponent) return null;
 

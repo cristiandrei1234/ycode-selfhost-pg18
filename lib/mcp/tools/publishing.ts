@@ -179,14 +179,15 @@ export function registerPublishingTools(server: McpServer) {
         await publishCSS();
       } catch { /* non-fatal */ }
 
+      // Save published_at before clearing the cache so re-rendered pages
+      // read the new publish date rather than the previous one.
+      try { await savePublishedAt(publishedAt); } catch { /* non-fatal */ }
+
       // Clear cache. No warming here: MCP is invoked over JSON-RPC, not HTTP,
       // so there's no Request/host header to build absolute URLs from. The
       // builder's HTTP publish endpoint warms after publish — this AI tool
       // path is rare enough that a cold next-visit is acceptable.
       try { await clearAllCache(); } catch { /* non-fatal */ }
-
-      // Save published_at timestamp
-      try { await savePublishedAt(publishedAt); } catch { /* non-fatal */ }
 
       const total = Object.values(changes).reduce((sum, n) => sum + n, 0);
 

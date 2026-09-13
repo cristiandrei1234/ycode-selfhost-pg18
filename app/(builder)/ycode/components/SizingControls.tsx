@@ -645,6 +645,7 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
                 <SelectItem value="visible">Visible</SelectItem>
                 <SelectItem value="hidden">Hidden</SelectItem>
                 <SelectItem value="scroll">Scroll</SelectItem>
+                <SelectItem value="ellipsis">Ellipsis</SelectItem>
                 <SelectItem value="auto">Auto</SelectItem>
               </SelectGroup>
             </SelectContent>
@@ -729,14 +730,13 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
                 </SelectContent>
               </Select>
             </ButtonGroup>
-            <span
-              role="button"
-              tabIndex={0}
+            <button
+              type="button"
               className="p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
               onClick={handleRemoveAspectRatio}
             >
               <Icon name="x" className="size-2.5" />
-            </span>
+            </button>
           </div>
         </div>
       )}

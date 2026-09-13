@@ -2,13 +2,13 @@ import { cache } from 'react';
 import { escapeHtml } from '@/lib/escape-html';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { getKnexClient } from '@/lib/knex-client';
-import { buildSlugPath, buildDynamicPageUrl, buildLocalizedSlugPath, buildLocalizedDynamicPageUrl, detectLocaleFromPath, matchPageWithTranslatedSlugs, matchDynamicPageWithTranslatedSlugs } from '@/lib/page-utils';
+import { buildSlugPath, buildDynamicPageUrl, buildLocalizedDynamicPageUrl, detectLocaleFromPath, matchPageWithTranslatedSlugs, matchDynamicPageWithTranslatedSlugs } from '@/lib/page-utils';
 import { getItemWithValues, getItemsWithValues, getItemsWithValuesByIds, getItemIdsByFieldValue, getItemsByCollectionId, getSlugsByItemIds } from '@/lib/repositories/collectionItemRepository';
 import { getValuesByItemIds } from '@/lib/repositories/collectionItemValueRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
 import { enrichItemsWithCountValues } from '@/lib/repositories/collectionCountRepository';
 import { getLocaleScaffoldTranslations, getCmsTranslationsForItems } from '@/lib/repositories/translationRepository';
-import { getTranslatableKey } from '@/lib/locale-runtime';
+import { getTranslatableKey, slimTranslations } from '@/lib/locale-runtime';
 import type { Page, PageFolder, PageLayers, Component, ComponentVariable, CollectionItemWithValues, CollectionField, Layer, CollectionPaginationMeta, Translation, Locale } from '@/types';
 import { getCollectionVariable, resolveFieldValue, evaluateVisibility, evaluateCondition, getLayerHtmlTag, filterDisabledSliderLayers } from '@/lib/layer-utils';
 import { isFieldVariable, isAssetVariable, createDynamicTextVariable, createDynamicRichTextVariable, createAssetVariable, getDynamicTextContent, getVariableStringValue, getAssetId, resolveDesignStyles } from '@/lib/variable-utils';
@@ -17,6 +17,7 @@ import { resolveComponents, applyComponentOverrides } from '@/lib/resolve-compon
 import { getComponentVariantLayers } from '@/lib/component-variant-utils';
 import { isTiptapDoc, hasBlockElementsWithResolver } from '@/lib/tiptap-utils';
 import { castValue, parseMultiReferenceValue, remapLayerIdsForCollectionItem } from '@/lib/collection-utils';
+import { isValidUUID } from '@/lib/utils';
 import { DEFAULT_TEXT_STYLES } from '@/lib/text-format-utils';
 
 // Pagination context passed through to resolveCollectionLayers
@@ -27,10 +28,10 @@ export interface PaginationContext {
   defaultPage?: number;
 }
 
-import { resolveFieldLinkValue, resolveRefCollectionItemId, generateLinkHref, isLinkAtCollectionBoundary, isLinkToCurrentPage, parseCollectionLinkValue, extractCrossCollectionItemIds } from '@/lib/link-utils';
+import { resolveRefCollectionItemId, generateLinkHref, isLinkAtCollectionBoundary, isLinkToCurrentPage, parseCollectionLinkValue, extractCrossCollectionItemIds } from '@/lib/link-utils';
 import type { LinkResolutionContext } from '@/lib/link-utils';
 import { getLinkSettingsFromMark } from '@/lib/tiptap-extensions/rich-text-link';
-import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
+import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP, SLIDER_BUTTON_ARIA_LABELS, isSliderChromeButton } from '@/lib/slider-constants';
 import { resolveInlineVariables, resolveInlineVariablesFromData } from '@/lib/inline-variables';
 import { buildPaginationNumbers, getPaginationLayerKind, hasPaginationVariables, paginationTextVariableToTemplate, resolvePaginationTextVariable } from '@/lib/pagination-text-utils';
 import { formatFieldValue, resolveFieldFromSources } from '@/lib/cms-variables-utils';
@@ -44,7 +45,7 @@ import { generateInitialAnimationCSS } from '@/lib/animation-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS } from '@/lib/map-utils';
 import { getMapboxAccessToken, getGoogleMapsEmbedApiKey } from '@/lib/map-server';
 import { getAssetsByIds } from '@/lib/repositories/assetRepository';
-import { isVirtualAssetField, findDisplayField, hasDynamicDateRule, isDynamicDateCondition, buildGlobalsMetaMap, buildGlobalsValueMap, mergeGlobalsIntoFieldData, type GlobalFieldMeta } from '@/lib/collection-field-utils';
+import { isVirtualAssetField, findDisplayField, hasDynamicDateRule, isDynamicDateCondition, buildGlobalsMetaMap, buildGlobalsValueMap, mergeGlobalsIntoFieldData, MULTI_ASSET_COLLECTION_ID, type GlobalFieldMeta } from '@/lib/collection-field-utils';
 import { getDefaultFormatId, isFormatValidForFieldType } from '@/lib/variable-format-utils';
 import type { DynamicVisibilityCondition, FieldVariable, AssetVariable, DynamicTextVariable, DynamicRichTextVariable, LinkSettings } from '@/types';
 import type { DesignColorVariable } from '@/types';
@@ -92,6 +93,37 @@ function createResolvedAssetVariable(
   return isVirtualAssetField(fieldId)
     ? createDynamicTextVariable(resolvedValue)
     : createAssetVariable(resolvedValue);
+}
+
+/** Build a minimal collection item wrapper around raw field values for inline resolution. */
+function buildMockCollectionItem(values: Record<string, string>): CollectionItemWithValues {
+  return {
+    id: 'temp',
+    collection_id: 'temp',
+    created_at: '',
+    updated_at: '',
+    deleted_at: null,
+    manual_order: 0,
+    is_published: true,
+    is_publishable: true,
+    content_hash: null,
+    values,
+  };
+}
+
+/**
+ * Resolve inline variables inside an image alt's dynamic_text content.
+ * Returns the original alt (or an empty alt) when there's nothing to resolve.
+ */
+function resolveImageAltVariable(
+  altVar: DynamicTextVariable | undefined,
+  resolveContent: (content: string) => string
+): DynamicTextVariable {
+  const content = altVar?.data?.content;
+  if (altVar?.type === 'dynamic_text' && typeof content === 'string' && content.includes('<ycode-inline-variable>')) {
+    return { type: 'dynamic_text', data: { content: resolveContent(content) } };
+  }
+  return altVar || createDynamicTextVariable('');
 }
 
 export interface PageData {
@@ -273,6 +305,9 @@ interface TranslationLoadContext {
   isPublished: boolean;
   tenantId?: string;
   loadedItemIds: Set<string>;
+  // In-flight loads keyed by item id. Concurrent resolutions of the same item
+  // await the same fetch instead of skipping it before rows are merged.
+  inFlight: Map<string, Promise<void>>;
 }
 
 const translationLoadContexts = new WeakMap<object, TranslationLoadContext>();
@@ -289,6 +324,7 @@ function registerTranslationContext(
     isPublished,
     tenantId,
     loadedItemIds: new Set(),
+    inFlight: new Map(),
   });
 }
 
@@ -309,22 +345,46 @@ export async function ensureCmsTranslations(
   const ctx = translationLoadContexts.get(translations);
   if (!ctx) return;
 
-  const missing: string[] = [];
+  // Partition requested ids: those needing a fresh fetch vs. those already
+  // being fetched by a concurrent caller (whose promise we must await).
+  const toFetch: string[] = [];
+  const waits: Promise<void>[] = [];
   for (const id of itemIds) {
-    if (id && !ctx.loadedItemIds.has(id)) {
-      ctx.loadedItemIds.add(id);
-      missing.push(id);
+    if (!id || ctx.loadedItemIds.has(id)) continue;
+    const existing = ctx.inFlight.get(id);
+    if (existing) {
+      waits.push(existing);
+    } else {
+      toFetch.push(id);
     }
   }
-  if (missing.length === 0) return;
 
-  try {
-    const rows = await getCmsTranslationsForItems(ctx.localeId, ctx.isPublished, missing, ctx.tenantId);
-    for (const row of rows) {
-      translations[getTranslatableKey(row)] = row;
+  if (toFetch.length > 0) {
+    // Mark loaded ids only AFTER rows are merged, so concurrent callers don't
+    // run applyCmsTranslations against a map that hasn't received the rows yet.
+    const loadPromise = (async () => {
+      try {
+        const rows = await getCmsTranslationsForItems(ctx.localeId, ctx.isPublished, toFetch, ctx.tenantId);
+        for (const row of rows) {
+          translations[getTranslatableKey(row)] = row;
+        }
+      } catch (error) {
+        console.error('Failed to load scoped CMS translations:', error);
+      } finally {
+        for (const id of toFetch) {
+          ctx.loadedItemIds.add(id);
+          ctx.inFlight.delete(id);
+        }
+      }
+    })();
+    for (const id of toFetch) {
+      ctx.inFlight.set(id, loadPromise);
     }
-  } catch (error) {
-    console.error('Failed to load scoped CMS translations:', error);
+    waits.push(loadPromise);
+  }
+
+  if (waits.length > 0) {
+    await Promise.all(waits);
   }
 }
 
@@ -827,13 +887,25 @@ async function fetchPageByPathInternal(
   }
 }
 
+/**
+ * Strip the bulk translation catalog from resolved page data, keeping only the
+ * slug + seo rows still consumed downstream (localized URLs and metadata). Text
+ * and media are already injected into the layer tree, so keeping the full
+ * catalog would only bloat caches and the serialized RSC payload.
+ */
+function withSlimTranslations(data: PageData | null): PageData | null {
+  if (!data?.translations) return data;
+  return { ...data, translations: slimTranslations(data.translations, { includeSeo: true }) };
+}
+
 export const fetchPageByPath = cache(async function fetchPageByPath(
   slugPath: string,
   isPublished: boolean,
   paginationContext?: PaginationContext,
   tenantId?: string,
 ): Promise<PageData | null> {
-  return fetchPageByPathInternal(slugPath, isPublished, paginationContext, tenantId, { resolveLayers: true });
+  const data = await fetchPageByPathInternal(slugPath, isPublished, paginationContext, tenantId, { resolveLayers: true });
+  return withSlimTranslations(data);
 });
 
 export async function fetchPageByPathForMetadata(
@@ -842,7 +914,8 @@ export async function fetchPageByPathForMetadata(
   paginationContext?: PaginationContext,
   tenantId?: string,
 ): Promise<PageData | null> {
-  return fetchPageByPathInternal(slugPath, isPublished, paginationContext, tenantId, { resolveLayers: false });
+  const data = await fetchPageByPathInternal(slugPath, isPublished, paginationContext, tenantId, { resolveLayers: false });
+  return withSlimTranslations(data);
 }
 
 /**
@@ -1153,7 +1226,11 @@ async function batchResolveReferenceFields(
   for (const values of itemsValues) {
     for (const field of referenceFields) {
       const refId = values[field.id];
-      if (refId && field.reference_collection_id) {
+      // Reference values are item UUIDs. Skip malformed values (e.g. a name left
+      // behind by a bad import): feeding a non-UUID into the `.in('id', …)` fetch
+      // errors the entire batch (`invalid input syntax for type uuid`), which
+      // would break rendering for every item, not just the corrupt field.
+      if (refId && isValidUUID(refId) && field.reference_collection_id) {
         allRefItemIds.add(refId);
         refCollectionIds.add(field.reference_collection_id);
       }
@@ -1317,19 +1394,7 @@ async function injectCollectionData(
   else if (textVariable && textVariable.type === 'dynamic_text') {
     const textContent = textVariable.data.content;
     if (textContent.includes('<ycode-inline-variable>')) {
-      const mockItem: CollectionItemWithValues = {
-        id: 'temp',
-        collection_id: 'temp',
-        created_at: '',
-        updated_at: '',
-        deleted_at: null,
-        manual_order: 0,
-        is_published: true,
-        is_publishable: true,
-        content_hash: null,
-        values: enhancedValues,
-      };
-      const resolved = resolveInlineVariablesWithRelationships(textContent, mockItem, timezone, rawItemValues);
+      const resolved = resolveInlineVariablesWithRelationships(textContent, buildMockCollectionItem(enhancedValues), timezone, rawItemValues);
 
       resolvedVars.text = {
         type: 'dynamic_text',
@@ -1338,13 +1403,24 @@ async function injectCollectionData(
     }
   }
 
-  // Image src field binding (variables structure)
+  // Image src field binding (variables structure). The alt may carry inline
+  // variables (e.g. multi-asset __asset_filename), so resolve it in both the
+  // field-bound and static-src cases.
+  const resolveImageAlt = (alt: DynamicTextVariable | undefined) =>
+    resolveImageAltVariable(alt, (content) =>
+      resolveInlineVariablesWithRelationships(content, buildMockCollectionItem(enhancedValues), timezone, rawItemValues));
+
   const imageSrc = layer.variables?.image?.src;
   if (imageSrc && isFieldVariable(imageSrc) && imageSrc.data.field_id) {
     const resolvedValue = resolveFieldValueWithRelationships(imageSrc, enhancedValues, layerDataMap);
     resolvedVars.image = {
       src: createResolvedAssetVariable(imageSrc.data.field_id, resolvedValue, imageSrc),
-      alt: layer.variables?.image?.alt || createDynamicTextVariable(''),
+      alt: resolveImageAlt(layer.variables?.image?.alt),
+    };
+  } else if (layer.variables?.image) {
+    resolvedVars.image = {
+      ...layer.variables.image,
+      alt: resolveImageAlt(layer.variables.image.alt),
     };
   }
 
@@ -1380,14 +1456,12 @@ async function injectCollectionData(
   // Lightbox CMS field binding — resolve filesField to concrete asset IDs/URLs
   const lightboxSettings = layer.settings?.lightbox;
   if (lightboxSettings?.filesSource === 'cms' && lightboxSettings.filesField && isFieldVariable(lightboxSettings.filesField)) {
-    const resolvedValue = resolveFieldValueWithRelationships(lightboxSettings.filesField, enhancedValues, layerDataMap);
+    // Multi-image fields resolve to an array (or JSON-encoded array); single-image
+    // fields resolve to a plain asset ID/URL, optionally comma-separated.
+    const resolvedValue = resolveFieldValueWithRelationships(lightboxSettings.filesField, enhancedValues, layerDataMap) as string | string[] | undefined;
     if (resolvedValue) {
-      // The value can be a single asset ID, a comma-separated list, or a JSON array
-      let resolvedFiles: string[];
-      try {
-        const parsed = JSON.parse(resolvedValue);
-        resolvedFiles = Array.isArray(parsed) ? parsed : [resolvedValue];
-      } catch {
+      let resolvedFiles = parseMultiAssetFieldValue(resolvedValue);
+      if (resolvedFiles.length === 0 && typeof resolvedValue === 'string') {
         resolvedFiles = resolvedValue.includes(',')
           ? resolvedValue.split(',').map(s => s.trim()).filter(Boolean)
           : [resolvedValue];
@@ -2058,7 +2132,11 @@ function collectBoundFieldIds(layers: Layer[]): { fieldIds: Set<string>; fieldPa
 function collectAllCollectionIds(layers: Layer[]): Set<string> {
   const ids = new Set<string>();
   const scan = (layer: Layer) => {
-    if (layer.variables?.collection?.id) ids.add(layer.variables.collection.id);
+    // Skip the virtual multi-asset collection id — it's not a real DB collection,
+    // and querying it (invalid UUID) errors the whole batch item fetch, which
+    // would leave every real collection on the page with no items.
+    const collectionId = layer.variables?.collection?.id;
+    if (collectionId && collectionId !== MULTI_ASSET_COLLECTION_ID) ids.add(collectionId);
     if (layer.settings?.optionsSource?.collectionId) ids.add(layer.settings.optionsSource.collectionId);
     if (layer.children) layer.children.forEach(scan);
   };
@@ -2332,6 +2410,12 @@ export async function resolveCollectionLayers(
   // resolve "current page item" against the outermost page item, never the
   // nearest enclosing collection.
   pageCollectionItemId?: string,
+  // Seeds the internal layer-data map so bindings inside `layers` that read from
+  // an ancestor collection layer (via `collection_layer_id`) resolve correctly
+  // even when that ancestor isn't part of `layers`. Used by the filter render
+  // path, which resolves a single collection item's children without the
+  // enclosing collection layer that SSR would otherwise seed here.
+  initialLayerDataMap?: Record<string, Record<string, string>>,
 ): Promise<Layer[]> {
   // Reuse caller-provided timezone, or fetch once for the entire tree
   if (!timezone) {
@@ -2428,19 +2512,67 @@ export async function resolveCollectionLayers(
           // Handle multi-asset collections - build virtual items from asset IDs
           if (sourceFieldType === 'multi_asset' && sourceFieldId && itemValues) {
             const fieldValue = itemValues[sourceFieldId];
-            const assetIds = parseMultiAssetFieldValue(fieldValue);
+            let assetIds = parseMultiAssetFieldValue(fieldValue);
 
-            if (assetIds.length === 0) {
+            // Pagination mirrors the regular collection branch below: the asset
+            // ID array is the full result set, so totalItems/maxTotal/page
+            // slicing all operate on it directly.
+            const multiAssetPagination = collectionVariable.pagination;
+            const isMultiAssetPaginated = multiAssetPagination?.enabled
+              && (multiAssetPagination?.mode === 'pages' || multiAssetPagination?.mode === 'load_more');
+
+            // The collection's configured offset skips leading assets before
+            // pagination; fold it into the page offset so it composes with
+            // pagination instead of being replaced by it.
+            const multiAssetBaseOffset = typeof collectionVariable.offset === 'number' && collectionVariable.offset > 0
+              ? collectionVariable.offset
+              : 0;
+
+            let multiAssetLimit: number | undefined;
+            let multiAssetOffset: number | undefined;
+            let multiAssetCurrentPage = 1;
+            if (isMultiAssetPaginated) {
+              const itemsPerPage = multiAssetPagination!.items_per_page || 10;
+              multiAssetCurrentPage = paginationContext?.pageNumbers?.[layer.id]
+                ?? paginationContext?.defaultPage
+                ?? 1;
+              multiAssetLimit = itemsPerPage;
+              multiAssetOffset = multiAssetBaseOffset + (multiAssetCurrentPage - 1) * itemsPerPage;
+            } else {
+              multiAssetLimit = collectionVariable.limit;
+              multiAssetOffset = collectionVariable.offset;
+            }
+
+            // When paginated, `limit` is a hard cap on the total (matches the
+            // regular collection branch); otherwise it acts as a per-page limit.
+            const multiAssetMaxTotal = isMultiAssetPaginated
+              && typeof collectionVariable.limit === 'number' && collectionVariable.limit > 0
+              ? collectionVariable.limit
+              : undefined;
+            if (multiAssetMaxTotal != null && assetIds.length > multiAssetMaxTotal) {
+              assetIds = assetIds.slice(0, multiAssetMaxTotal);
+            }
+
+            const multiAssetTotal = assetIds.length;
+
+            if (multiAssetTotal === 0 && !isMultiAssetPaginated) {
               // No assets - return layer without children
               return { ...layer, children: [] };
             }
 
-            // Fetch all assets at once (returns Record<string, Asset>)
-            const assetsById = await getAssetsByIds(assetIds, isPublished);
+            // Slice to the current page (mirrors DB pagination).
+            let pageAssetIds = assetIds;
+            if (multiAssetLimit || multiAssetOffset) {
+              const start = multiAssetOffset || 0;
+              pageAssetIds = assetIds.slice(start, multiAssetLimit ? start + multiAssetLimit : undefined);
+            }
+
+            // Fetch only the assets shown on this page (returns Record<string, Asset>)
+            const assetsById = await getAssetsByIds(pageAssetIds, isPublished);
 
             // Clone the layer for each asset (like regular collections)
             const clonedLayers: Layer[] = await Promise.all(
-              assetIds.map(async (assetId) => {
+              pageAssetIds.map(async (assetId) => {
                 const asset = assetsById[assetId];
                 if (!asset) return null;
 
@@ -2507,6 +2639,29 @@ export async function resolveCollectionLayers(
               })
             ).then(results => results.filter((item): item is Layer => item !== null));
 
+            // Build pagination metadata so sibling pagination layers ("Total
+            // items", "Page X of Y", Prev/Next) resolve against the asset count.
+            let multiAssetPaginationMeta: CollectionPaginationMeta | undefined;
+            if (isMultiAssetPaginated && multiAssetPagination) {
+              const itemsPerPage = multiAssetPagination.items_per_page || 10;
+              // Offset skips leading assets, so the paginated total excludes them.
+              const multiAssetDisplayTotal = Math.max(0, multiAssetTotal - multiAssetBaseOffset);
+              multiAssetPaginationMeta = {
+                currentPage: multiAssetCurrentPage,
+                totalPages: Math.ceil(multiAssetDisplayTotal / itemsPerPage),
+                totalItems: multiAssetDisplayTotal,
+                itemsPerPage,
+                layerId: layer.id,
+                collectionId: collectionVariable.id,
+                mode: multiAssetPagination.mode,
+                itemIds: assetIds,
+                isPublished,
+                // No sort: multi-asset order is the image order in the field.
+                maxTotal: multiAssetMaxTotal,
+                baseOffset: multiAssetBaseOffset,
+              };
+            }
+
             // Return a fragment layer containing all cloned items
             // _fragment is a special marker that LayerRenderer and layerToHtml handle
             return {
@@ -2521,12 +2676,20 @@ export async function resolveCollectionLayers(
                 ...layer.variables,
                 collection: undefined,
               },
+              _paginationMeta: multiAssetPaginationMeta,
             };
           }
 
           // Check if pagination is enabled (either 'pages' or 'load_more' mode)
           const paginationConfig = collectionVariable.pagination;
           const isPaginated = paginationConfig?.enabled && (paginationConfig?.mode === 'pages' || paginationConfig?.mode === 'load_more');
+
+          // The collection's configured offset skips this many leading records
+          // BEFORE pagination. It composes with pagination rather than being
+          // replaced by it: page N shows records [baseOffset + (N-1)*perPage ...].
+          const baseOffset = typeof collectionVariable.offset === 'number' && collectionVariable.offset > 0
+            ? collectionVariable.offset
+            : 0;
 
           // Determine limit and offset based on pagination settings
           let limit: number | undefined;
@@ -2540,7 +2703,9 @@ export async function resolveCollectionLayers(
               ?? paginationContext?.defaultPage
               ?? 1;
             limit = itemsPerPage;
-            offset = (currentPage - 1) * itemsPerPage;
+            // Fold the base offset into the page offset so the first record is
+            // still skipped on every page (not just when pagination is off).
+            offset = baseOffset + (currentPage - 1) * itemsPerPage;
           } else {
             // Use legacy limit/offset from collection variable
             limit = collectionVariable.limit;
@@ -2759,10 +2924,14 @@ export async function resolveCollectionLayers(
           let paginationMeta: CollectionPaginationMeta | undefined;
           if (isPaginated && paginationConfig) {
             const itemsPerPage = paginationConfig.items_per_page || 10;
+            // `totalItems` counts the capped pool; the offset skips leading
+            // records, so the paginated total (and page count) is the pool
+            // minus the offset.
+            const displayTotal = Math.max(0, totalItems - baseOffset);
             paginationMeta = {
               currentPage,
-              totalPages: Math.ceil(totalItems / itemsPerPage),
-              totalItems,
+              totalPages: Math.ceil(displayTotal / itemsPerPage),
+              totalItems: displayTotal,
               itemsPerPage,
               layerId: layer.id,
               collectionId: collectionVariable.id,
@@ -2777,6 +2946,7 @@ export async function resolveCollectionLayers(
               sortBy: collectionVariable.sort_by,
               sortOrder: collectionVariable.sort_order,
               maxTotal,
+              baseOffset,
             };
           }
 
@@ -2819,6 +2989,7 @@ export async function resolveCollectionLayers(
               sortOrderInputLayerId: collectionVariable.sort_order_inputLayerId,
               limit: isPaginated ? paginationConfig.items_per_page : collectionVariable.limit,
               maxTotal,
+              baseOffset,
               paginationMode: isPaginated ? paginationConfig.mode : undefined,
               layerTemplate: layer.children || [],
               collectionLayerClasses: Array.isArray(layer.classes) ? layer.classes : (layer.classes ? [layer.classes] : []),
@@ -3038,7 +3209,7 @@ export async function resolveCollectionLayers(
     return layer;
   };
 
-  const result = await Promise.all(layers.map(layer => resolveLayer(layer, parentItemValues, undefined, parentCollectionItemId)));
+  const result = await Promise.all(layers.map(layer => resolveLayer(layer, parentItemValues, initialLayerDataMap, parentCollectionItemId)));
 
   // Collect pagination metadata from all fragments
   const paginationMetaMap: Record<string, CollectionPaginationMeta> = {};
@@ -3589,13 +3760,44 @@ export async function renderCollectionItemsToHtml(
     return { item, rawValues, formattedValues };
   });
 
+  // Scope reference resolution to the fields actually bound in this template,
+  // mirroring SSR (`resolveCollectionLayers`). Resolving every reference field
+  // regardless of use pulls in unrelated fields — and a single corrupt value
+  // (e.g. a non-UUID stored on an unused reference field) would otherwise error
+  // the whole batch item fetch and 500 the filter request.
+  //
+  // `collectBoundFieldIds` stops descending at nested collection boundaries, so
+  // a single scan of the root misses bindings that live *inside* a nested
+  // collection layer but read from this (ancestor) collection — e.g. a State
+  // reference name shown inside a nested States collection. Scan every collection
+  // layer scope separately and union their paths, exactly like SSR's
+  // `scanCollectionLayersForBounds` re-attribution, so those cross-scope
+  // reference dot-paths (`<refField>.<name>`) are resolved and don't render empty.
+  const scanRoot: Layer = collectionLayer
+    ? ({ ...collectionLayer, children: layerTemplate } as Layer)
+    : ({ id: collectionLayerId, name: 'div', children: layerTemplate } as unknown as Layer);
+  const templateBoundPaths = new Set<string>();
+  const collectScopedBoundPaths = (layerList: Layer[]) => {
+    for (const layer of layerList) {
+      if (layer.variables?.collection?.id) {
+        const { fieldPaths } = collectBoundFieldIds([layer]);
+        for (const p of fieldPaths) templateBoundPaths.add(p);
+      }
+      if (layer.children) collectScopedBoundPaths(layer.children);
+    }
+  };
+  collectScopedBoundPaths([scanRoot]);
+  // `scanRoot` may be a synthetic wrapper without a collection variable; ensure
+  // its own scope is captured regardless.
+  for (const p of collectBoundFieldIds([scanRoot]).fieldPaths) templateBoundPaths.add(p);
+
   // Batch-resolve reference fields for ALL items (2–3 queries total)
   const allEnhancedValues = await batchResolveReferenceFields(
     preprocessed.map(p => p.formattedValues),
     collectionFields,
     isPublished,
     undefined,
-    undefined,
+    templateBoundPaths.size > 0 ? templateBoundPaths : undefined,
     translations,
   );
 
@@ -3625,7 +3827,13 @@ export async function renderCollectionItemsToHtml(
       );
 
       // Resolve nested collection layers (sub-collections like "shades" inside "colors")
-      // Pass item.values so nested collections can filter based on parent item's field values
+      // Pass item.values so nested collections can filter based on parent item's field values.
+      // Seed the layer-data map with this (parent) collection layer's resolved
+      // values so bindings inside a nested collection that read from the parent
+      // via `collection_layer_id` (e.g. a State reference name shown inside a
+      // nested States collection) resolve instead of rendering empty — SSR seeds
+      // this when it resolves the enclosing collection layer, which the filter
+      // render path strips.
       let resolvedLayers = await resolveCollectionLayers(
         injectedLayers,
         isPublished,
@@ -3635,6 +3843,7 @@ export async function renderCollectionItemsToHtml(
         item.id,
         htmlTimezone,
         pageLinkContext?.pageCollectionItemId,
+        { [collectionLayerId]: enhancedValues },
       );
 
       // Resolve all AssetVariables to URLs server-side
@@ -3800,19 +4009,7 @@ async function injectCollectionDataForHtml(
   else if (textVariable && textVariable.type === 'dynamic_text') {
     const textContent = textVariable.data.content;
     if (textContent.includes('<ycode-inline-variable>')) {
-      const mockItem: CollectionItemWithValues = {
-        id: 'temp',
-        collection_id: 'temp',
-        created_at: '',
-        updated_at: '',
-        deleted_at: null,
-        manual_order: 0,
-        is_published: true,
-        is_publishable: true,
-        content_hash: null,
-        values: enhancedValues,
-      };
-      const resolved = resolveInlineVariables(textContent, mockItem, timezone, rawItemValues);
+      const resolved = resolveInlineVariables(textContent, buildMockCollectionItem(enhancedValues), timezone, rawItemValues);
       resolvedVars.text = {
         type: 'dynamic_text',
         data: { content: resolved },
@@ -3830,13 +4027,24 @@ async function injectCollectionDataForHtml(
     return enhancedValues[fullPath] || '';
   };
 
-  // Image src field binding (variables structure)
+  // Image src field binding (variables structure). The alt may carry inline
+  // variables (e.g. multi-asset __asset_filename), so resolve it in both the
+  // field-bound and static-src cases.
+  const resolveImageAlt = (alt: DynamicTextVariable | undefined) =>
+    resolveImageAltVariable(alt, (content) =>
+      resolveInlineVariables(content, buildMockCollectionItem(enhancedValues), timezone, rawItemValues));
+
   const imageSrc = layer.variables?.image?.src;
   if (imageSrc && isFieldVariable(imageSrc) && imageSrc.data.field_id) {
     const resolvedValue = resolveFieldPath(imageSrc);
     resolvedVars.image = {
       src: createResolvedAssetVariable(imageSrc.data.field_id, resolvedValue, imageSrc),
-      alt: layer.variables?.image?.alt || createDynamicTextVariable(''),
+      alt: resolveImageAlt(layer.variables?.image?.alt),
+    };
+  } else if (layer.variables?.image) {
+    resolvedVars.image = {
+      ...layer.variables.image,
+      alt: resolveImageAlt(layer.variables.image.alt),
     };
   }
 
@@ -4031,9 +4239,10 @@ function resolveLayerAssets(
     }
   }
 
-  // Resolve richTextImage src URLs inside Tiptap content
+  // Resolve richTextImage src URLs inside Tiptap content. The value is read
+  // from persisted layer JSON, so guard against a primitive before probing it.
   const textVar = layer.variables?.text;
-  if (textVar && 'type' in textVar && textVar.type === 'dynamic_rich_text') {
+  if (textVar && typeof textVar === 'object' && 'type' in textVar && textVar.type === 'dynamic_rich_text') {
     const resolvedContent = resolveRichTextImageAssets((textVar as any).data?.content, assetMap);
     if (resolvedContent !== (textVar as any).data?.content) {
       variableUpdates.text = {
@@ -4397,6 +4606,8 @@ export interface PageLinkContext {
    * no hydration, so an iframe with no `height` clips the user's content.
    */
   isStaticExport?: boolean;
+  /** Immediate parent layer name — used to coerce slider nav children to span. */
+  parentLayerName?: string;
 }
 
 /** Build an `assetMap`-backed `getAsset` callback compatible with `generateLinkHref`. */
@@ -4471,7 +4682,7 @@ export function layerToHtml(
     });
 
   // Get the HTML tag
-  let tag = getLayerHtmlTag(layer);
+  let tag = getLayerHtmlTag(layer, pageLinkContext?.parentLayerName);
 
   // Buttons with link settings render as <a> directly instead of being
   // wrapped in <a><button></button></a> which is invalid HTML
@@ -4544,6 +4755,13 @@ export function layerToHtml(
     attrs.push(SWIPER_DATA_ATTR_MAP[layer.name]);
   }
 
+  if (isSliderChromeButton(layer.name)) {
+    attrs.push('type="button"');
+    if (!layer.settings?.customAttributes?.['aria-label']) {
+      attrs.push(`aria-label="${escapeHtml(SLIDER_BUTTON_ARIA_LABELS[layer.name])}"`);
+    }
+  }
+
   // Add slider settings as data attribute on the root slider layer
   if (layer.name === 'slider' && layer.settings?.slider) {
     attrs.push(`data-slider-id="${escapeHtml(layer.id)}"`);
@@ -4591,8 +4809,11 @@ export function layerToHtml(
     attrs.push(`id="${escapeHtml(layer.attributes.id)}"`);
   }
 
-  // Hide elements marked as hiddenGenerated (e.g. alerts, slider fraction placeholder)
-  if (layer.hiddenGenerated) {
+  // Hide elements marked as hiddenGenerated. Scoped to alerts only: the flag is
+  // meant for form success/error alerts, whose reveal path clears inline display.
+  // Non-alert layers (e.g. animated dropdowns) manage visibility via
+  // data-gsap-hidden and must not be pinned to display:none here.
+  if (layer.hiddenGenerated && layer.alertType) {
     const existingDynamic = layer._dynamicStyles || {};
     layer = { ...layer, _dynamicStyles: { ...existingDynamic, display: 'none' } };
   }
@@ -4697,10 +4918,11 @@ export function layerToHtml(
     attrs.push('data-layer-type="image"');
 
     const imageAlt = layer.variables?.image?.alt;
+    let resolvedAlt = '';
     if (imageAlt && imageAlt.type === 'dynamic_text') {
-      const resolvedAlt = resolveInlineVariablesFromData(imageAlt.data.content, effectiveCollectionItemData, pageCollectionItemData, 'UTC', effectiveLayerDataMap);
-      attrs.push(`alt="${escapeHtml(resolvedAlt)}"`);
+      resolvedAlt = resolveInlineVariablesFromData(imageAlt.data.content, effectiveCollectionItemData, pageCollectionItemData, 'UTC', effectiveLayerDataMap);
     }
+    attrs.push(`alt="${escapeHtml(resolvedAlt)}"`);
 
     if (intrinsicWidth) attrs.push(`width="${intrinsicWidth}"`);
     if (intrinsicHeight) attrs.push(`height="${intrinsicHeight}"`);
@@ -4729,7 +4951,8 @@ export function layerToHtml(
       const embedUrl = `https://www.${domain}/embed/${videoId}${params.length > 0 ? '?' + params.join('&') : ''}`;
 
       attrs.push(`src="${escapeHtml(embedUrl)}"`);
-      attrs.push('frameborder="0"');
+      attrs.push('title="YouTube video"');
+      attrs.push('loading="lazy"');
       attrs.push('allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"');
       attrs.push('allowfullscreen');
       attrs.push('data-layer-type="video"');
@@ -4765,7 +4988,7 @@ export function layerToHtml(
         return `<div${attrsStr}><iframe src="${escapeHtml(iframeProps.src)}" referrerpolicy="no-referrer-when-downgrade" loading="lazy" style="width:100%;height:100%;border:none;display:block" title="Map"></iframe></div>`;
       }
       const escapedSrcdoc = escapeHtml(iframeProps.srcDoc);
-      return `<div${attrsStr}><iframe srcdoc="${escapedSrcdoc}" sandbox="allow-scripts allow-same-origin" style="width:100%;height:100%;border:none;display:block" title="Map"></iframe></div>`;
+      return `<div${attrsStr}><iframe srcdoc="${escapedSrcdoc}" sandbox="allow-scripts allow-same-origin" loading="lazy" style="width:100%;height:100%;border:none;display:block" title="Map"></iframe></div>`;
     }
 
     const attrsStr = attrs.length > 0 ? ' ' + attrs.join(' ') : '';
@@ -4831,6 +5054,10 @@ export function layerToHtml(
     }
     // Add data-icon attribute to trigger CSS styling
     attrs.push('data-icon="true"');
+    const iconAttrs = layer.settings?.customAttributes;
+    if (!iconAttrs?.['aria-hidden'] && !iconAttrs?.['aria-label']) {
+      attrs.push('aria-hidden="true"');
+    }
   }
 
   // Handle Code Embed layers - render as iframe for SSR
@@ -4875,9 +5102,10 @@ export function layerToHtml(
 
     attrs.push('data-html-embed="true"');
     attrs.push(`srcdoc="${escapedIframeContent}"`);
-    attrs.push('sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"');
+    attrs.push('sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals"');
     attrs.push('style="width: 100%; border: none; display: block;"');
-    attrs.push(`title="Code Embed ${layer.id}"`);
+    attrs.push('title="Code embed"');
+    attrs.push('loading="lazy"');
 
     const attrsStr = attrs.length > 0 ? ' ' + attrs.join(' ') : '';
     return `<iframe${attrsStr}></iframe>`;
@@ -4970,80 +5198,12 @@ export function layerToHtml(
     if (template) attrs.push(`data-pagination-template="${escapeHtml(template)}"`);
   }
 
-  // For buttons/divs rendered as <a>, resolve link href and add attributes directly
-  if ((isButtonWithLink || isDivWithLink) && buttonLinkSettings) {
-    let btnLinkHref = '';
-
-    switch (buttonLinkSettings.type) {
-      case 'url':
-        btnLinkHref = buttonLinkSettings.url?.data?.content || '';
-        break;
-      case 'email':
-        btnLinkHref = buttonLinkSettings.email?.data?.content ? `mailto:${buttonLinkSettings.email.data.content}` : '';
-        break;
-      case 'phone':
-        btnLinkHref = buttonLinkSettings.phone?.data?.content ? `tel:${buttonLinkSettings.phone.data.content}` : '';
-        break;
-      case 'page':
-        if (buttonLinkSettings.page?.id && pages && folders) {
-          const linkedPage = pages.find(p => p.id === buttonLinkSettings.page?.id);
-          if (linkedPage) {
-            btnLinkHref = buildLocalizedSlugPath(linkedPage, folders, 'page', locale, translations);
-          }
-        }
-        break;
-      case 'field': {
-        const fieldId = buttonLinkSettings.field?.data?.field_id;
-        const collLayerId = buttonLinkSettings.field?.data?.collection_layer_id;
-        let rawValue: string | undefined;
-        if (collLayerId && effectiveLayerDataMap?.[collLayerId]) {
-          rawValue = fieldId ? effectiveLayerDataMap[collLayerId][fieldId] : undefined;
-        } else {
-          rawValue = fieldId ? effectiveCollectionItemData?.[fieldId] : undefined;
-        }
-        if (fieldId && rawValue) {
-          const fieldType = buttonLinkSettings.field?.data?.field_type;
-          btnLinkHref = resolveFieldLinkValue({
-            fieldId,
-            rawValue,
-            fieldType,
-            context: {
-              pages: pages || [],
-              folders: folders || [],
-              collectionItemSlugs,
-              locale,
-              translations,
-              isPreview: false,
-              getAsset: makeAssetMapResolver(assetMap),
-            },
-            assetMap,
-          });
-        }
-        break;
-      }
-    }
-
-    if (buttonLinkSettings.anchor_layer_id) {
-      const anchorValue = anchorMap?.[buttonLinkSettings.anchor_layer_id] || buttonLinkSettings.anchor_layer_id;
-      btnLinkHref = btnLinkHref ? `${btnLinkHref}#${anchorValue}` : `#${anchorValue}`;
-    }
-
-    if (btnLinkHref) {
-      attrs.push(`href="${escapeHtml(btnLinkHref)}"`);
-      if (buttonLinkSettings.target) {
-        attrs.push(`target="${escapeHtml(buttonLinkSettings.target)}"`);
-      }
-      const btnLinkRel = buttonLinkSettings.rel || (buttonLinkSettings.target === '_blank' ? 'noopener noreferrer' : '');
-      if (btnLinkRel) {
-        attrs.push(`rel="${escapeHtml(btnLinkRel)}"`);
-      }
-      if (buttonLinkSettings.download) {
-        attrs.push('download');
-      }
-    }
-    if (isButtonWithLink) {
-      attrs.push('role="button"');
-    }
+  // Buttons rendered as <a> get a button role. The href and other link
+  // attributes are already emitted by the shared `generateLinkHref` path above
+  // (buttons/divs with links force `tag = 'a'`), so no separate resolution here —
+  // this keeps `{slug}` and other CMS variables resolved consistently.
+  if (isButtonWithLink) {
+    attrs.push('role="button"');
   }
 
   // For slider layers, strip inactive pagination/navigation children from the tree
@@ -5052,10 +5212,11 @@ export function layerToHtml(
     : layer.children;
 
   // Render children
+  const childLinkContext: PageLinkContext = { ...pageLinkContext, parentLayerName: layer.name };
   const childrenHtml = effectiveChildren
     ? effectiveChildren
       .map((child) =>
-        layerToHtml(child, effectiveCollectionItemId, pages, folders, collectionItemSlugs, locale, translations, anchorMap, effectiveCollectionItemData, pageCollectionItemData, assetMap, effectiveLayerDataMap, components, ancestorComponentIds, layer.name === 'slides', pageLinkContext)
+        layerToHtml(child, effectiveCollectionItemId, pages, folders, collectionItemSlugs, locale, translations, anchorMap, effectiveCollectionItemData, pageCollectionItemData, assetMap, effectiveLayerDataMap, components, ancestorComponentIds, layer.name === 'slides', childLinkContext)
       )
       .join('')
     : '';
@@ -5204,78 +5365,44 @@ export function layerToHtml(
     elementHtml = `<${tag}${attrsStr}>${escapeHtml(textContent)}${childrenHtml}</${tag}>`;
   }
 
-  // Wrap with link if layer has link settings (but is not already an <a> tag)
+  // Wrap with link if layer has link settings (but is not already an <a> tag).
+  // Reuse `generateLinkHref` so all link types — including dynamic-page
+  // collection_item_id keywords and `{slug}` substitution — resolve identically
+  // to layer `<a>` tags, self-closing wraps and React rendering.
   const linkSettings = layer.variables?.link;
   if (tag !== 'a' && linkSettings && linkSettings.type) {
-    let linkHref = '';
+    const linkHref = generateLinkHref(linkSettings, {
+      pages,
+      folders,
+      collectionItemSlugs,
+      collectionItemId: effectiveCollectionItemId,
+      pageCollectionItemId: pageLinkContext?.pageCollectionItemId,
+      collectionItemData: effectiveCollectionItemData,
+      pageCollectionItemData,
+      isPreview: pageLinkContext?.isPreview,
+      locale,
+      translations,
+      getAsset: makeAssetMapResolver(assetMap),
+      anchorMap,
+      layerDataMap: effectiveLayerDataMap,
+      pageCollectionSortedItemIds: pageLinkContext?.pageCollectionSortedItemIds,
+    });
 
-    switch (linkSettings.type) {
-      case 'url':
-        linkHref = linkSettings.url?.data?.content || '';
-        break;
-      case 'email':
-        linkHref = linkSettings.email?.data?.content ? `mailto:${linkSettings.email.data.content}` : '';
-        break;
-      case 'phone':
-        linkHref = linkSettings.phone?.data?.content ? `tel:${linkSettings.phone.data.content}` : '';
-        break;
-      case 'page':
-        if (linkSettings.page?.id && pages && folders) {
-          const linkedPage = pages.find(p => p.id === linkSettings.page?.id);
-          if (linkedPage) {
-            // Use localized URL if locale is active
-            linkHref = buildLocalizedSlugPath(linkedPage, folders, 'page', locale, translations);
-          }
-        }
-        break;
-      case 'field': {
-        const wrapFieldId = linkSettings.field?.data?.field_id;
-        const wrapCollectionLayerId = linkSettings.field?.data?.collection_layer_id;
-        // Use layer-specific data if collection_layer_id is specified
-        let rawValue: string | undefined;
-        if (wrapCollectionLayerId && effectiveLayerDataMap?.[wrapCollectionLayerId]) {
-          rawValue = wrapFieldId ? effectiveLayerDataMap[wrapCollectionLayerId][wrapFieldId] : undefined;
-        } else {
-          rawValue = wrapFieldId ? effectiveCollectionItemData?.[wrapFieldId] : undefined;
-        }
-        if (wrapFieldId && rawValue) {
-          const fieldType = linkSettings.field?.data?.field_type;
-          linkHref = resolveFieldLinkValue({
-            fieldId: wrapFieldId,
-            rawValue,
-            fieldType,
-            context: {
-              pages: pages || [],
-              folders: folders || [],
-              collectionItemSlugs,
-              locale,
-              translations,
-              isPreview: false,
-              getAsset: makeAssetMapResolver(assetMap),
-            },
-            assetMap,
-          });
-        }
-        break;
-      }
-    }
+    const atBoundary = !linkHref && isLinkAtCollectionBoundary(linkSettings, {
+      pageCollectionItemId: pageLinkContext?.pageCollectionItemId,
+      pageCollectionSortedItemIds: pageLinkContext?.pageCollectionSortedItemIds,
+    });
 
-    // Append anchor if present - resolve layer ID to actual anchor value
-    if (linkSettings.anchor_layer_id) {
-      const anchorValue = anchorMap?.[linkSettings.anchor_layer_id] || linkSettings.anchor_layer_id;
+    // Wrap content in <a> tag if we have a valid href (or a disabled boundary link)
+    if (linkHref || atBoundary) {
+      const linkAttrs: string[] = [];
       if (linkHref) {
-        linkHref = `${linkHref}#${anchorValue}`;
+        linkAttrs.push(`href="${escapeHtml(linkHref)}"`);
+        if (isCurrentPageLink) {
+          linkAttrs.push('aria-current="page"');
+        }
       } else {
-        linkHref = `#${anchorValue}`;
-      }
-    }
-
-    // Wrap content in <a> tag if we have a valid href
-    if (linkHref) {
-      const linkAttrs: string[] = [`href="${escapeHtml(linkHref)}"`];
-
-      if (isCurrentPageLink) {
-        linkAttrs.push('aria-current="page"');
+        linkAttrs.push('aria-disabled="true"', 'data-link-disabled="true"');
       }
 
       if (linkSettings.target) {

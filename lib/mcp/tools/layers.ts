@@ -12,9 +12,11 @@ import {
   getTiptapTextContent,
   buildTiptapDoc,
   applyDesignToLayer,
+  applyBackgroundImageDesign,
 } from '@/lib/mcp/utils';
 import type { RichTextBlock } from '@/lib/mcp/utils';
 import { layerToExportHtml } from '@/lib/html-layer-converter';
+import { collectFontFamiliesFromDesign, ensureFontsInstalled, fontWarnings } from '@/lib/mcp/font-install';
 import { getCachedLayers as getPageLayers, saveCachedLayers } from '@/lib/mcp/page-layers';
 import { designSchema, richTextBlockSchema, templateEnum } from './shared-schemas';
 
@@ -44,8 +46,13 @@ ELEMENT TYPES:
 - Content: heading (h1), text (paragraph), richText (rich text block with formatting)
 - Media: image, video, audio, icon, iframe
 - Actions: button
-- Forms: form, input, textarea
+- Forms: form, input, textarea, select, checkbox, radio, label — native, ready-to-use fields.
+  The "form" template arrives pre-populated with native fields, a submit button, and alerts.
 - Utilities: htmlEmbed, slider, lightbox
+
+FORMS:
+- ALWAYS build forms from these native form elements. NEVER simulate inputs/fields with
+  div, styled text, or htmlEmbed — only native fields are wired for submission and editing.
 
 NESTING RULES:
 - Leaf elements (image, text, input, video, icon, etc.) CANNOT have children
@@ -114,7 +121,13 @@ being viewed (aria-current) — use it for active nav-link and pagination stylin
 
 GRADIENTS: Use bgGradientVars in backgrounds to set CSS gradients.
 Example: { backgrounds: { isActive: true, bgGradientVars: { "--bg-img": "linear-gradient(135deg, #667eea 0%, #764ba2 100%)" } } }
-For gradient text: also set backgroundClip: "text" and color to "transparent".`,
+For gradient text: also set backgroundClip: "text" and color to "transparent".
+
+CURSOR: effects.cursor — "pointer", "default", "text", "grab", "wait", "not-allowed", or "auto".
+Set this on the clickable layer itself (button, link, card), not a nested text child.
+
+TEXT SHADOW: typography.textShadow — e.g. "0px_1px_2px_rgba(0,0,0,0.4)" (underscores, not spaces)
+or a named size ("sm", "md", "lg"). Apply on the text/heading/button layer.`,
     {
       page_id: z.string().describe('The page ID'),
       layer_id: z.string().describe('The layer ID to update'),
@@ -138,6 +151,12 @@ For gradient text: also set backgroundClip: "text" and color to "transparent".`,
 
       await savePageLayers(page_id, updated);
 
+      // Auto-install any Google Font this edit referenced but never added.
+      const fontFamilies = new Set<string>();
+      collectFontFamiliesFromDesign(design as Record<string, unknown>, fontFamilies);
+      const fonts = await ensureFontsInstalled(fontFamilies);
+      const warnings = fontWarnings(fonts);
+
       const updatedLayer = findLayerById(updated, layer_id);
       const stateLabel = ui_state !== 'neutral' ? ` (${ui_state} state)` : '';
       const bpLabel = breakpoint !== 'desktop' ? ` [${breakpoint}]` : '';
@@ -149,6 +168,8 @@ For gradient text: also set backgroundClip: "text" and color to "transparent".`,
             layer_id,
             classes: updatedLayer?.classes,
             design: updatedLayer?.design,
+            fonts_auto_installed: fonts.installed.length > 0 ? fonts.installed : undefined,
+            design_warnings: warnings.length > 0 ? warnings : undefined,
           }),
         }],
       };
@@ -433,13 +454,26 @@ LINK TYPES:
         ? { type: 'asset' as const, data: { asset_id } }
         : { type: 'dynamic_text' as const, data: { content: url! } };
 
-      const updated = updateLayerById(layers, layer_id, (l) => ({
+      // Set the variable AND the design/classes that render it — the variable
+      // alone only supplies the --bg-img value, nothing displays it without
+      // the bg-[image:var(--bg-img)] class.
+      const updated = updateLayerById(layers, layer_id, (l) => applyBackgroundImageDesign({
         ...l,
         variables: { ...l.variables, backgroundImage: { src } },
       }));
 
       await savePageLayers(page_id, updated);
-      return { content: [{ type: 'text' as const, text: `Set background image for "${layer.customName || layer.name}"` }] };
+      const updatedLayer = findLayerById(updated, layer_id);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            message: `Set background image for "${layer.customName || layer.name}"`,
+            layer_id,
+            classes: updatedLayer?.classes,
+          }),
+        }],
+      };
     },
   );
 
@@ -466,7 +500,7 @@ COMMON USES:
       layer_id: z.string().describe('The layer ID'),
       tag: z.string().optional().describe('HTML tag override: h1, h2, h3, h4, h5, h6, p, span, div, section, nav, footer, header, main, aside, article'),
       html_id: z.string().optional().describe('Custom HTML element ID (for anchor links, CSS targeting)'),
-      html_embed_code: z.string().optional().describe('For htmlEmbed layers: the HTML/CSS/JS code to embed'),
+      html_embed_code: z.string().optional().describe('For htmlEmbed layers: the HTML/CSS/JS code to embed. Runs in a sandboxed iframe on the published site — it cannot overlay the page or access the parent DOM'),
       custom_attributes: z.record(z.string(), z.string()).optional().describe('Custom HTML attributes as { name: value } pairs'),
       custom_name: z.string().optional().describe('Display name for the layer in the builder'),
       hidden: z.boolean().optional().describe('Hide the layer on the canvas (still renders on the published site).'),

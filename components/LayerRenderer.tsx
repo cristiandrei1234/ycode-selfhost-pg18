@@ -10,10 +10,11 @@ import { useAuthStore } from '@/stores/useAuthStore';
 import type { Layer, Locale, ComponentVariable, FormSettings, LinkSettings, Breakpoint, CollectionItemWithValues, CollectionField, Component, DynamicTextVariable, DynamicRichTextVariable } from '@/types';
 import type { UseLiveLayerUpdatesReturn } from '@/hooks/use-live-layer-updates';
 import type { UseLiveComponentUpdatesReturn } from '@/hooks/use-live-component-updates';
-import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById, applyCustomAttributes } from '@/lib/layer-utils';
+import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextEditable, isTextContentLayer, isRichTextLayer, getCollectionVariable, evaluateVisibility, findAncestorByName, filterDisabledSliderLayers, getLayerCmsFieldBinding, findLayerById, applyCustomAttributes, containsLayerId } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
 import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
-import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
+import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP, SLIDER_BUTTON_ARIA_LABELS, isSliderChromeButton } from '@/lib/slider-constants';
+import { getSliderPresizeVars } from '@/lib/slider-utils';
 import { useCanvasSlider } from '@/hooks/use-canvas-slider';
 import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
 import { getDynamicTextContent, getImageUrlFromVariable, getVideoUrlFromVariable, getIframeUrlFromVariable, isFieldVariable, isAssetVariable, isStaticTextVariable, isDynamicTextVariable, getAssetId, getStaticTextContent, createAssetVariable, createDynamicTextVariable, resolveDesignStyles } from '@/lib/variable-utils';
@@ -142,6 +143,8 @@ interface LayerRendererProps {
    * over the rest of the page. Computed server-side by PageRenderer.
    */
   lcpCandidateLayerId?: string | null;
+  /** Immediate parent layer name — used to coerce slider nav children to span. */
+  parentLayerName?: string;
 }
 
 const LayerRenderer: React.FC<LayerRendererProps> = ({
@@ -193,6 +196,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
   componentRootContextMenu,
   onComponentEdit,
   lcpCandidateLayerId,
+  parentLayerName,
 }) => {
   const [editingLayerId, setEditingLayerId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState<string>('');
@@ -265,6 +269,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
               sortOrderInputLayerId={layer._filterConfig!.sortOrderInputLayerId}
               limit={layer._filterConfig!.limit}
               maxTotal={layer._filterConfig!.maxTotal}
+              baseOffset={layer._filterConfig!.baseOffset}
               paginationMode={layer._filterConfig!.paginationMode}
               layerTemplate={layer._filterConfig!.layerTemplate}
               collectionLayerClasses={layer._filterConfig!.collectionLayerClasses}
@@ -344,6 +349,7 @@ const LayerRenderer: React.FC<LayerRendererProps> = ({
         componentRootContextMenu={componentRootContextMenu}
         onComponentEdit={onComponentEdit}
         lcpCandidateLayerId={lcpCandidateLayerId}
+        parentLayerName={parentLayerName}
       />
     );
   };
@@ -412,6 +418,7 @@ const LayerItemImpl: React.FC<{
   componentRootContextMenu?: boolean;
   onComponentEdit?: (componentId: string, instanceLayerId: string) => void;
   lcpCandidateLayerId?: string | null;
+  parentLayerName?: string;
 }> = ({
   layer,
   isEditMode,
@@ -467,6 +474,7 @@ const LayerItemImpl: React.FC<{
   serverSettings,
   componentRootContextMenu,
   lcpCandidateLayerId,
+  parentLayerName,
 }) => {
   // Subscribe to selection state from the store for reactive updates without
   // forcing the entire LayerRenderer tree to re-render when selection changes
@@ -480,6 +488,17 @@ const LayerItemImpl: React.FC<{
   const isEditing = editingLayerId === layer.id;
   const isDragging = activeLayerId === layer.id;
   const textEditable = isTextEditable(layer);
+
+  // Reveal an editor-hidden layer (e.g. an animated dropdown) when it OR a
+  // descendant is selected. Subscribed reactively so a hidden ancestor updates
+  // when a descendant is selected — its own `isSelected` wouldn't change then.
+  // Returns a stable `false` for non-hidden layers, so it never re-renders them.
+  const isEditorHidden = isEditMode && !!editorHiddenLayerIds?.has(layer.id);
+  const revealFromSelection = useEditorStore((state) => {
+    if (!isEditorHidden) return false;
+    const sel = state.selectedLayerId;
+    return sel ? containsLayerId(layer, sel) : false;
+  });
 
   const isEditor = useAuthStore((state) => state.role === 'editor');
 
@@ -638,7 +657,7 @@ const LayerItemImpl: React.FC<{
     [layer.id, sharedRendererProps, isEditMode, currentLocale, translations, pageId]
   );
 
-  let htmlTag = getLayerHtmlTag(layer);
+  let htmlTag = getLayerHtmlTag(layer, parentLayerName);
 
   const isSimpleTextLayer = isTextContentLayer(layer);
 
@@ -1130,7 +1149,14 @@ const LayerItemImpl: React.FC<{
       if (valueToRender !== undefined) {
         // Value is typed as ComponentVariableValue - check if it's a text variable (has 'type' property)
         if ('type' in valueToRender && valueToRender.type === 'dynamic_rich_text') {
-          return renderRichText(valueToRender as any, collectionLayerData, pageCollectionItemData || undefined, layer.textStyles, useSpanForParagraphs, isEditMode, linkContext, timezone, effectiveLayerDataMap, allComponents, renderComponentBlock, effectiveAncestorIds, isSimpleTextLayer, globalsMeta);
+          // For heading/text layers, flatten multi-paragraph content so the
+          // wrapper's typography applies instead of inner block styles — matches
+          // the public/preview renderer and the other rich-text branches.
+          const richTextValue = valueToRender as any;
+          const variable = isSimpleTextLayer
+            ? { ...richTextValue, data: { ...richTextValue.data, content: flattenTiptapParagraphs(richTextValue.data.content) } }
+            : richTextValue;
+          return renderRichText(variable as any, collectionLayerData, pageCollectionItemData || undefined, layer.textStyles, useSpanForParagraphs, isEditMode, linkContext, timezone, effectiveLayerDataMap, allComponents, renderComponentBlock, effectiveAncestorIds, isSimpleTextLayer, globalsMeta);
         }
         if ('type' in valueToRender && valueToRender.type === 'dynamic_text') {
           return (valueToRender as any).data.content;
@@ -1217,8 +1243,8 @@ const LayerItemImpl: React.FC<{
   // (e.g. legacy data), extract its text instead of stringifying to "[object Object]".
   const rawImageAltContent = getDynamicTextContent(effectiveImageSettings?.alt) as unknown;
   const rawImageAlt = typeof rawImageAltContent === 'object' && rawImageAltContent !== null
-    ? (extractPlainTextFromTiptap(rawImageAltContent) || 'Image')
-    : String(rawImageAltContent || 'Image');
+    ? (extractPlainTextFromTiptap(rawImageAltContent) || '')
+    : String(rawImageAltContent || '');
   const originalImageAlt = rawImageAlt.includes('<ycode-inline-variable>')
     ? resolveInlineVariablesFromData(rawImageAlt, collectionLayerData, pageCollectionItemData ?? undefined, timezone, effectiveLayerDataMap)
     : rawImageAlt;
@@ -1228,7 +1254,7 @@ const LayerItemImpl: React.FC<{
     translations,
     pageId,
     layer._masterComponentId
-  ) || 'Image';
+  ) || '';
   const imageAlt = translatedImageAlt;
 
   // Resolve audio source - check for linked component variable first
@@ -1381,6 +1407,7 @@ const LayerItemImpl: React.FC<{
   const layerData = useCollectionLayerStore((state) => state.layerData[layer.id]);
   const isLoadingLayerData = useCollectionLayerStore((state) => state.loading[layer.id]);
   const fetchLayerData = useCollectionLayerStore((state) => state.fetchLayerData);
+  const setLayerTotal = useCollectionLayerStore((state) => state.setLayerTotal);
   const fieldsByCollectionId = useCollectionsStore((state) => state.fields);
   const itemsByCollectionId = useCollectionsStore((state) => state.items);
   const referencedItemsByCollectionId = useCollectionLayerStore((state) => state.referencedItems);
@@ -1523,14 +1550,20 @@ const LayerItemImpl: React.FC<{
     // `limit`/`offset`. We slice unconditionally for paginated layers, and
     // when static filters are present for non-paginated ones (the API
     // returns the configured limit when there are no static filters, so no
-    // re-slicing is needed there).
+    // re-slicing is needed there). Multi-asset items are always built
+    // client-side (never fetched with limit/offset), so they must be sliced
+    // here too.
     const pagination = collectionVariable?.pagination;
     const isPaginated = !!pagination?.enabled && (pagination.mode === 'pages' || pagination.mode === 'load_more');
 
     if (isPaginated) {
       const itemsPerPage = pagination!.items_per_page || 10;
-      items = items.slice(0, itemsPerPage);
-    } else if (hasStaticFilters) {
+      // Offset composes with pagination: skip the first N records, then show
+      // the first page. The fetch below over-fetches by `offset` for the plain
+      // (non-filtered) case so these leading records are present to skip.
+      const offset = collectionVariable?.offset && collectionVariable.offset > 0 ? collectionVariable.offset : 0;
+      items = items.slice(offset, offset + itemsPerPage);
+    } else if (hasStaticFilters || sourceFieldType === 'multi_asset') {
       const offset = collectionVariable?.offset ?? 0;
       const limit = collectionVariable?.limit;
       if (offset || limit) {
@@ -1622,7 +1655,10 @@ const LayerItemImpl: React.FC<{
       fetchLimit = FILTERED_FETCH_LIMIT;
       fetchOffset = 0;
     } else if (isPaginated) {
-      fetchLimit = pagination!.items_per_page || 10;
+      // Over-fetch by the base offset so the memo can skip the leading records
+      // client-side and still fill the first page (mirrors SSR's offset+page).
+      const baseOffset = collectionVariable.offset && collectionVariable.offset > 0 ? collectionVariable.offset : 0;
+      fetchLimit = (pagination!.items_per_page || 10) + baseOffset;
       fetchOffset = 0;
     } else {
       fetchLimit = collectionVariable.limit;
@@ -1658,6 +1694,23 @@ const LayerItemImpl: React.FC<{
     fetchLayerData,
     layer.id,
   ]);
+
+  // Multi-asset layers build virtual items client-side, so fetchLayerData skips
+  // them and layerTotal stays empty — meaning sibling pagination layers ("Total
+  // items", "Page X of Y") can't resolve. Mirror SSR by publishing the asset
+  // count (uncapped; paginationDisplayTotal applies the maxTotal limit) here.
+  const multiAssetTotalCount = useMemo<number | null>(() => {
+    if (sourceFieldType !== 'multi_asset' || !sourceFieldId) return null;
+    const fieldValue = sourceFieldSource === 'page'
+      ? pageCollectionItemData?.[sourceFieldId]
+      : collectionLayerData?.[sourceFieldId];
+    return parseMultiAssetFieldValue(fieldValue).length;
+  }, [sourceFieldType, sourceFieldId, sourceFieldSource, pageCollectionItemData, collectionLayerData]);
+
+  useEffect(() => {
+    if (!isEditMode || multiAssetTotalCount === null) return;
+    setLayerTotal(layer.id, multiAssetTotalCount);
+  }, [isEditMode, multiAssetTotalCount, setLayerTotal, layer.id]);
 
   // For component instances in edit mode, use the component's layers as children
   // For published pages, children are already resolved server-side
@@ -2199,9 +2252,23 @@ const LayerItemImpl: React.FC<{
       if (layer.name === 'slider' && layer.settings?.slider) {
         elementProps['data-slider-id'] = layer.id;
         elementProps['data-slider-settings'] = JSON.stringify(layer.settings.slider);
+        // Pre-size slides before Swiper JS runs (prevents a 1-slide flash) only
+        // for numeric multi-view sliders; per-view 1 keeps its own slide widths.
+        const presizeVars = getSliderPresizeVars(layer.settings.slider);
+        if (presizeVars) {
+          elementProps['data-slider-presize'] = '';
+          const existingStyle = (typeof elementProps.style === 'object' && elementProps.style) || {};
+          elementProps.style = { ...existingStyle, ...presizeVars };
+        }
       }
       if (SWIPER_DATA_ATTR_MAP[layer.name]) {
         elementProps[SWIPER_DATA_ATTR_MAP[layer.name]] = '';
+      }
+      if (isSliderChromeButton(layer.name)) {
+        elementProps.type = 'button';
+        if (!elementProps['aria-label']) {
+          elementProps['aria-label'] = SLIDER_BUTTON_ARIA_LABELS[layer.name];
+        }
       }
 
       // Lightbox data attributes (LightboxInitializer)
@@ -2225,8 +2292,12 @@ const LayerItemImpl: React.FC<{
       }
     }
 
-    // Hide elements with hiddenGenerated: true by default (in all modes)
-    if (layer.hiddenGenerated) {
+    // Hide elements with hiddenGenerated: true by default (in all modes).
+    // Scoped to alerts only: the flag is meant for form success/error alerts
+    // (toggled here for the builder preview). Non-alert layers (e.g. animated
+    // dropdowns) manage visibility via data-gsap-hidden and must not be pinned
+    // to display:none here.
+    if (layer.hiddenGenerated && layer.alertType) {
       const existingStyle = typeof elementProps.style === 'object' ? elementProps.style : {};
       elementProps.style = { ...existingStyle, display: 'none' };
     }
@@ -2247,21 +2318,10 @@ const LayerItemImpl: React.FC<{
         (editorBreakpoint && hiddenBreakpoints.includes(editorBreakpoint));
 
       if (shouldHideOnBreakpoint) {
-        const shouldHide = parentComponentLayerId || (() => {
-          const storeSelectedId = useEditorStore.getState().selectedLayerId;
-          const isSelectedOrChildSelected = isSelected || (storeSelectedId && (() => {
-            const checkDescendants = (children: Layer[] | undefined): boolean => {
-              if (!children) return false;
-              for (const child of children) {
-                if (child.id === storeSelectedId) return true;
-                if (checkDescendants(child.children)) return true;
-              }
-              return false;
-            };
-            return checkDescendants(layer.children);
-          })());
-          return !isSelectedOrChildSelected;
-        })();
+        // Inside component instances internal layers can't be individually
+        // selected, so always hide. Otherwise reveal when this layer or a
+        // descendant is selected (subscribed reactively above).
+        const shouldHide = parentComponentLayerId ? true : !revealFromSelection;
 
         if (shouldHide) {
           const existingStyle = typeof elementProps.style === 'object' ? elementProps.style : {};
@@ -2474,10 +2534,11 @@ const LayerItemImpl: React.FC<{
 
       const isLcpCandidate = !!lcpCandidateLayerId && layer.id === lcpCandidateLayerId;
       const imgLoadingAttr = layer.attributes?.loading as string | undefined;
-      // LCP candidate always loads eagerly with high fetchpriority — overrides
-      // the image template's default `loading="lazy"`. Other images keep
-      // whatever the user/template set (defaults to lazy).
-      const effectiveLoading = isLcpCandidate ? 'eager' : imgLoadingAttr;
+      // LCP candidate always loads eagerly with high fetchpriority. Every other
+      // image falls back to `lazy` when no explicit value is set: React 19
+      // auto-emits `<link rel="preload" as="image">` for any non-lazy <img>, so
+      // an unset attribute would wastefully preload below-the-fold images.
+      const effectiveLoading = isLcpCandidate ? 'eager' : (imgLoadingAttr ?? 'lazy');
 
       const optimizedSrc = getOptimizedImageUrl(finalImageUrl, 1920, 85);
 
@@ -2613,7 +2674,7 @@ const LayerItemImpl: React.FC<{
     }
 
     // Handle button inside form - set type="submit" only when not in edit mode (preview and published)
-    if (htmlTag === 'button' && isInsideForm && !isEditMode) {
+    if (htmlTag === 'button' && isInsideForm && !isEditMode && !isSliderChromeButton(layer.name)) {
       // Only override if type is not explicitly set or is 'button'
       if (!normalizedAttributes.type || normalizedAttributes.type === 'button') {
         elementProps.type = 'submit';
@@ -2812,6 +2873,9 @@ const LayerItemImpl: React.FC<{
       // instead of collapsing. Inert when both dimensions are explicitly set.
       const iconAspectRatio = getSvgAspectRatioStyle(iconHtml);
       const iconElementStyle = (typeof elementProps.style === 'object' && elementProps.style) || undefined;
+      if (elementProps['aria-hidden'] == null && elementProps['aria-label'] == null) {
+        elementProps['aria-hidden'] = true;
+      }
 
       return (
         <Tag
@@ -2831,7 +2895,7 @@ const LayerItemImpl: React.FC<{
           data-layer-id={layer.id}
           data-layer-type="htmlEmbed"
           data-html-embed="true"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals"
           className={fullClassName}
           style={{
             width: '100%',
@@ -2839,7 +2903,8 @@ const LayerItemImpl: React.FC<{
             display: 'block',
             ...mergedStyle,
           }}
-          title={`Code Embed ${layer.id}`}
+          title={layer.customName || 'Code embed'}
+          loading="lazy"
         />
       );
     }
@@ -2900,7 +2965,8 @@ const LayerItemImpl: React.FC<{
               border: 'none',
               display: 'block',
             }}
-            title="Map"
+            title={layer.customName || 'Map'}
+            loading="lazy"
             suppressHydrationWarning
           />
         </div>
@@ -2922,8 +2988,9 @@ const LayerItemImpl: React.FC<{
           const domain = privacyMode ? 'youtube-nocookie.com' : 'youtube.com';
 
           // Build YouTube embed URL with parameters
+          // Never autoplay on the canvas to avoid distracting playback while editing
           const params: string[] = [];
-          if (normalizedAttributes?.autoplay === true) params.push('autoplay=1');
+          if (!isEditMode && normalizedAttributes?.autoplay === true) params.push('autoplay=1');
           if (normalizedAttributes?.muted === true) params.push('mute=1');
           if (normalizedAttributes?.loop === true) params.push(`loop=1&playlist=${videoId}`);
           if (normalizedAttributes?.controls !== true) params.push('controls=0');
@@ -2938,7 +3005,8 @@ const LayerItemImpl: React.FC<{
             className: fullClassName,
             style: mergedStyle,
             src: embedUrl,
-            frameBorder: '0',
+            title: layer.customName || 'YouTube video',
+            loading: 'lazy',
             allow: 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture',
             allowFullScreen: true,
           };
@@ -2953,26 +3021,36 @@ const LayerItemImpl: React.FC<{
             applyCustomAttributes(iframeProps, layer.settings.customAttributes);
           }
 
-          // Only add editor event handlers in edit mode (client-side only)
+          // On the canvas, the cross-origin iframe swallows clicks (so the layer
+          // can't be selected) and lets the user start playback. Wrap it in a
+          // selectable container and disable iframe interaction, mirroring the
+          // native media and map handling.
           if (isEditMode && !isEditing) {
-            const originalOnClick = elementProps.onClick as ((e: React.MouseEvent) => void) | undefined;
-            iframeProps.onClick = (e: React.MouseEvent) => {
-              if (isLockedByOther) {
-                e.stopPropagation();
-                e.preventDefault();
-                return;
-              }
-              if (e.button !== 2) {
-                e.stopPropagation();
-                onLayerClick?.(layer.id, e);
-              }
-              if (originalOnClick) {
-                originalOnClick(e);
-              }
-            };
-            iframeProps.onContextMenu = (e: React.MouseEvent) => {
-              e.stopPropagation();
-            };
+            const mediaOnlyKeys = [
+              'controls', 'loop', 'muted', 'preload', 'autoplay', 'volume',
+              'playsInline', 'poster', 'src', 'youtubePrivacyMode',
+              'controlsList', 'crossOrigin', 'disablePictureInPicture', 'disableRemotePlayback',
+            ];
+            const wrapperProps: Record<string, any> = { ...elementProps };
+            mediaOnlyKeys.forEach((key) => delete wrapperProps[key]);
+            // Positioning context so the absolutely-positioned iframe fills the
+            // wrapper's (aspect-ratio) box exactly, with no gaps.
+            wrapperProps.className = `${wrapperProps.className || ''} relative`.trim();
+
+            return (
+              <div {...wrapperProps}>
+                <iframe
+                  key={`youtube-${layer.id}-${videoId}`}
+                  src={embedUrl}
+                  title="YouTube video"
+                  className="absolute inset-0 block h-full w-full pointer-events-none"
+                  style={{ border: 'none' }}
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                  suppressHydrationWarning
+                />
+              </div>
+            );
           }
 
           return (
@@ -3081,7 +3159,8 @@ const LayerItemImpl: React.FC<{
       // React treats autoPlay as a DOM property, not an HTML attribute,
       // so it won't survive SSR or hydration. Remove from props and
       // apply via ref to avoid both the warning and the rendering issue.
-      const shouldAutoPlay = mediaProps.autoplay === true;
+      // Never autoplay on the canvas to avoid distracting playback while editing.
+      const shouldAutoPlay = !isEditMode && mediaProps.autoplay === true;
       delete mediaProps.autoplay;
 
       // React doesn't reliably reflect `muted` to the DOM during SSR/hydration,
@@ -3103,45 +3182,8 @@ const LayerItemImpl: React.FC<{
         mediaProps.poster = posterUrl;
       }
 
-      // Handle special attributes that need to be set on the DOM element
-      // (autoplay, muted, and volume must be set via JavaScript on the DOM element)
-      if (htmlTag === 'audio' || htmlTag === 'video') {
-        const originalRef = mediaProps.ref;
-        const volumeValue = normalizedAttributes?.volume
-          ? parseInt(normalizedAttributes.volume) / 100
-          : undefined;
-
-        if (shouldAutoPlay || shouldMute || volumeValue !== undefined) {
-          mediaProps.ref = (element: HTMLAudioElement | HTMLVideoElement | null) => {
-            if (originalRef) {
-              if (typeof originalRef === 'function') {
-                originalRef(element);
-              } else {
-                (originalRef as React.MutableRefObject<HTMLAudioElement | HTMLVideoElement | null>).current = element;
-              }
-            }
-
-            if (element) {
-              // Mute before play() so mobile browsers allow autoplay.
-              if (shouldMute) {
-                element.muted = true;
-                element.setAttribute('muted', '');
-              }
-              if (shouldAutoPlay) {
-                element.autoplay = true;
-                element.setAttribute('autoplay', '');
-                element.play().catch(() => {});
-              }
-              if (volumeValue !== undefined) {
-                element.volume = volumeValue;
-              }
-            }
-          };
-        }
-      }
-
-      return (
-        <Tag {...mediaProps}>
+      const mediaChildren = (
+        <>
           {textContent && textContent}
           {effectiveChildren && effectiveChildren.length > 0 && (
             <LayerRenderer
@@ -3185,8 +3227,99 @@ const LayerItemImpl: React.FC<{
               isSlideChild={layer.name === 'slides'}
               serverSettings={serverSettings}
               lcpCandidateLayerId={lcpCandidateLayerId}
+              parentLayerName={layer.name}
             />
           )}
+        </>
+      );
+
+      // On the canvas, <audio> is entirely native controls that swallow clicks,
+      // so the layer can't be selected and clicking starts playback. Wrap it in
+      // a selectable container and make the element non-interactive. <video> is
+      // handled below without a wrapper so it keeps its exact published sizing.
+      if (isEditMode && htmlTag === 'audio') {
+        // Media-only attributes belong on the element, not the wrapper div.
+        const mediaOnlyKeys = [
+          'controls', 'loop', 'muted', 'preload', 'autoplay', 'volume',
+          'playsInline', 'poster', 'src', 'youtubePrivacyMode',
+          'controlsList', 'crossOrigin', 'disablePictureInPicture', 'disableRemotePlayback',
+        ];
+        const wrapperProps: Record<string, any> = { ...mediaProps };
+        mediaOnlyKeys.forEach((key) => delete wrapperProps[key]);
+        // <audio> has no intrinsic height/width classes. Keep the wrapper
+        // block-level (so stacked players don't sit side by side) but shrink it
+        // to the player's natural width instead of stretching full width.
+        wrapperProps.className = `${wrapperProps.className || ''} w-fit max-w-full`.trim();
+
+        const mediaElementProps: Record<string, any> = { ...normalizedAttributes };
+        delete mediaElementProps.autoplay;
+        delete mediaElementProps.volume;
+        delete mediaElementProps.youtubePrivacyMode;
+        if (mediaSrc) mediaElementProps.src = mediaSrc;
+        mediaElementProps.className = 'pointer-events-none';
+        mediaElementProps.tabIndex = -1;
+        mediaElementProps.suppressHydrationWarning = true;
+
+        return (
+          <div {...wrapperProps}>
+            <Tag {...mediaElementProps}>
+              {mediaChildren}
+            </Tag>
+          </div>
+        );
+      }
+
+      // Block manual playback of <video> on the canvas without altering its
+      // layout: it renders exactly like the published page, but any attempt to
+      // play (clicking to select, native controls) is immediately paused.
+      if (isEditMode && htmlTag === 'video') {
+        const originalOnPlay = mediaProps.onPlay as ((e: React.SyntheticEvent<HTMLVideoElement>) => void) | undefined;
+        mediaProps.onPlay = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+          e.currentTarget.pause();
+          originalOnPlay?.(e);
+        };
+      }
+
+      // Handle special attributes that need to be set on the DOM element
+      // (autoplay, muted, and volume must be set via JavaScript on the DOM element)
+      if (htmlTag === 'audio' || htmlTag === 'video') {
+        const originalRef = mediaProps.ref;
+        const volumeValue = normalizedAttributes?.volume
+          ? parseInt(normalizedAttributes.volume) / 100
+          : undefined;
+
+        if (shouldAutoPlay || shouldMute || volumeValue !== undefined) {
+          mediaProps.ref = (element: HTMLAudioElement | HTMLVideoElement | null) => {
+            if (originalRef) {
+              if (typeof originalRef === 'function') {
+                originalRef(element);
+              } else {
+                (originalRef as React.MutableRefObject<HTMLAudioElement | HTMLVideoElement | null>).current = element;
+              }
+            }
+
+            if (element) {
+              // Mute before play() so mobile browsers allow autoplay.
+              if (shouldMute) {
+                element.muted = true;
+                element.setAttribute('muted', '');
+              }
+              if (shouldAutoPlay) {
+                element.autoplay = true;
+                element.setAttribute('autoplay', '');
+                element.play().catch(() => {});
+              }
+              if (volumeValue !== undefined) {
+                element.volume = volumeValue;
+              }
+            }
+          };
+        }
+      }
+
+      return (
+        <Tag {...mediaProps}>
+          {mediaChildren}
         </Tag>
       );
     }
@@ -3427,6 +3560,7 @@ const LayerItemImpl: React.FC<{
                     serverSettings={serverSettings}
                     onComponentEdit={onComponentEdit}
                     lcpCandidateLayerId={lcpCandidateLayerId}
+                    parentLayerName={layer.name}
                   />
                 )}
               </Tag>
@@ -3498,6 +3632,7 @@ const LayerItemImpl: React.FC<{
               serverSettings={serverSettings}
               onComponentEdit={onComponentEdit}
               lcpCandidateLayerId={lcpCandidateLayerId}
+              parentLayerName={layer.name}
             />
           )}
 
@@ -3575,6 +3710,7 @@ const LayerItemImpl: React.FC<{
             serverSettings={serverSettings}
             onComponentEdit={onComponentEdit}
             lcpCandidateLayerId={lcpCandidateLayerId}
+            parentLayerName={layer.name}
           />
         )}
       </Tag>

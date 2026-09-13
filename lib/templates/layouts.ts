@@ -34281,6 +34281,9 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
         }
       },
       'classes': 'flex flex-col w-[100%] items-center pt-[20px] pb-[20px] bg-[#ffffff]',
+      'settings': {
+        'tag': 'header'
+      },
       'children': [
         {
           'id': 'lyr-ml0o0z1kpz9lgn',
@@ -34308,6 +34311,9 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
             }
           },
           'classes': 'flex flex-col w-[100%] items-center pt-[20px] pb-[20px] bg-[#ffffff]',
+          'settings': {
+            'tag': 'nav'
+          },
           'children': [
             {
               'id': 'lyr-ml0o0z1kvic1di',
@@ -34796,10 +34802,10 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
               'customName': 'Container'
             }
           ],
-          'customName': 'Section'
+          'customName': 'Nav'
         }
       ],
-      'customName': 'Section',
+      'customName': 'Header',
       '_inlinedComponentName': 'Navigation'
     },
   },
@@ -34832,6 +34838,9 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
         }
       },
       'classes': 'flex flex-col w-[100%] items-center bg-[#ffffff] pt-[25px] pb-[25px]',
+      'settings': {
+        'tag': 'header'
+      },
       'children': [
         {
           'id': 'lyr-ml0p6eablzp8wo',
@@ -34859,6 +34868,9 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
             }
           },
           'classes': 'flex flex-col w-[100%] items-center bg-[#ffffff] pt-[25px] pb-[25px]',
+          'settings': {
+            'tag': 'nav'
+          },
           'children': [
             {
               'id': 'lyr-ml0p6eabjud5cp',
@@ -35284,10 +35296,10 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
               'customName': 'Container'
             }
           ],
-          'customName': 'Section'
+          'customName': 'Nav'
         }
       ],
-      'customName': 'Section',
+      'customName': 'Header',
       '_inlinedComponentName': 'Navigation'
     },
   },
@@ -36600,7 +36612,7 @@ export const layoutTemplates: Record<string, LayoutTemplate> = {
                                           'content': [
                                             {
                                               'type': 'text',
-                                              'text': 'info@ycode.com'
+                                              'text': 'hello@example.com'
                                             }
                                           ]
                                         }

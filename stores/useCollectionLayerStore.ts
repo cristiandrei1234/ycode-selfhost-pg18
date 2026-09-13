@@ -46,6 +46,7 @@ interface CollectionLayerActions {
   // Pagination actions
   fetchPage: (layerId: string, page: number) => Promise<{ items: CollectionItemWithValues[]; meta: CollectionPaginationMeta } | null>;
   setPaginationMeta: (layerId: string, meta: CollectionPaginationMeta) => void;
+  setLayerTotal: (layerId: string, total: number) => void;
 }
 
 type CollectionLayerStore = CollectionLayerState & CollectionLayerActions;
@@ -398,6 +399,16 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
     }));
   },
 
+  // Set the total matching rows for a layer. Used by multi-asset collection
+  // layers, which build virtual items client-side instead of fetching via
+  // fetchLayerData (so layerTotal is never populated by the normal flow).
+  setLayerTotal: (layerId, total) => {
+    set((state) => {
+      if (state.layerTotal[layerId] === total) return state;
+      return { layerTotal: { ...state.layerTotal, [layerId]: total } };
+    });
+  },
+
   // Fetch a specific page for a layer with pagination
   fetchPage: async (layerId, page) => {
     const { paginationMeta, layerConfig } = get();
@@ -415,7 +426,10 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
     }));
 
     try {
-      const offset = (page - 1) * meta.itemsPerPage;
+      // The collection's base offset skips leading records before pagination,
+      // so fold it into the page offset and exclude it from the displayed total.
+      const baseOffset = meta.baseOffset ?? 0;
+      const offset = baseOffset + (page - 1) * meta.itemsPerPage;
 
       const response = await collectionsApi.getItems(config.collectionId, {
         sortBy: config.sortBy,
@@ -429,7 +443,7 @@ export const useCollectionLayerStore = create<CollectionLayerStore>((set, get) =
       }
 
       const items = response.data?.items || [];
-      const total = response.data?.total || 0;
+      const total = Math.max(0, (response.data?.total || 0) - baseOffset);
 
       // Build new pagination meta
       const newMeta: CollectionPaginationMeta = {

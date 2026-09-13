@@ -223,6 +223,62 @@ export function measureContentExtent(doc: Document): number {
 }
 
 /**
+ * True when a layer must be excluded from component content-extent measurement.
+ * `position: fixed` overlays/backdrops are pinned to the viewport, so a
+ * full-height backdrop (`fixed h-full`) measures as tall as the iframe — feeding
+ * back into the iframe height and ballooning the canvas. They never define the
+ * content extent, so they're skipped. Layers hidden on load (display:none)
+ * already measure as a zero-size rect and are filtered separately, so once a
+ * hidden-by-animation layer is revealed it is measured again and the canvas
+ * height recalculates to fit it.
+ */
+export function isNonContentLayer(node: HTMLElement, win: Window): boolean {
+  return win.getComputedStyle(node).position === 'fixed';
+}
+
+/** Visible rectangle of a layer after intersecting with its clipping ancestors. */
+export interface ClippedRect {
+  top: number;
+  left: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Compute a layer's rect clamped to any `overflow` clipping ancestors up to
+ * (but excluding) `boundary`. `getBoundingClientRect` ignores ancestor overflow,
+ * so children clipped by an `overflow-hidden`/`max-h` container would otherwise
+ * inflate content-extent measurement. Clamping keeps the measured extent to what
+ * is actually visible while still letting absolutely-positioned elements escape
+ * their non-clipping ancestors.
+ */
+export function getClippedLayerRect(node: HTMLElement, boundary: Element, win: Window): ClippedRect {
+  const rect = node.getBoundingClientRect();
+  let { top, left, right, bottom } = rect;
+
+  let el = node.parentElement;
+  while (el && el !== boundary) {
+    const style = win.getComputedStyle(el);
+    if (style.overflowX !== 'visible' || style.overflowY !== 'visible') {
+      const ancestorRect = el.getBoundingClientRect();
+      if (style.overflowX !== 'visible') {
+        left = Math.max(left, ancestorRect.left);
+        right = Math.min(right, ancestorRect.right);
+      }
+      if (style.overflowY !== 'visible') {
+        top = Math.max(top, ancestorRect.top);
+        bottom = Math.min(bottom, ancestorRect.bottom);
+      }
+    }
+    el = el.parentElement;
+  }
+
+  return { top, left, right, bottom, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+}
+
+/**
  * Shared HTML template for canvas-style iframes with Tailwind Browser CDN.
  * Used by both the editor Canvas and the thumbnail capture hook.
  * @param mountId - The ID of the mount point div (default: 'canvas-mount')

@@ -53,7 +53,9 @@ import { useCanvasTextEditorStore } from '@/stores/useCanvasTextEditorStore';
 
 // 4b. Internal components
 import Canvas from './Canvas';
+import CanvasBuildSkeleton from './CanvasBuildSkeleton';
 import { CollectionFieldSelector } from './CollectionFieldSelector';
+import AiActivityOverlay from '@/components/AiActivityOverlay';
 import SelectionOverlay from '@/components/SelectionOverlay';
 import RichTextLinkPopover from './RichTextLinkPopover';
 import PageSelector from './PageSelector';
@@ -616,6 +618,12 @@ const CenterCanvas = React.memo(function CenterCanvas({
   // Track whether zoom calculation is ready (prevents flash of wrong zoom on initial load)
   const [isCanvasReady, setIsCanvasReady] = useState(false);
 
+  // Hide the component canvas while its auto-zoom settles. Opening a component
+  // runs several measurement passes (width/height) that each re-fit the zoom;
+  // revealing only after dimensions hold steady avoids a visible size jump.
+  const [isComponentCanvasSettling, setIsComponentCanvasSettling] = useState(false);
+  const componentSettleTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
   // Optimize store subscriptions - use selective selectors (scoped to current page only)
   const currentDraft = usePagesStore((state) => currentPageId ? state.draftsByPageId[currentPageId] : null);
   const addLayerFromTemplate = usePagesStore((state) => state.addLayerFromTemplate);
@@ -652,6 +660,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
   const setCurrentPageCollectionItemId = useEditorStore((state) => state.setCurrentPageCollectionItemId);
   const setHoveredLayerId = useEditorStore((state) => state.setHoveredLayerId);
   const isPreviewMode = useEditorStore((state) => state.isPreviewMode);
+  const aiBuildingPageId = useEditorStore((state) => state.aiBuildingPageId);
   const activeSidebarTab = useEditorStore((state) => state.activeSidebarTab);
   const activeInteractionTriggerLayerId = useEditorStore((state) => state.activeInteractionTriggerLayerId);
   const activeInteractionTargetLayerIds = useEditorStore((state) => state.activeInteractionTargetLayerIds);
@@ -662,6 +671,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
   const activeListItemIndex = useEditorStore((state) => state.activeListItemIndex);
   const elementPicker = useEditorStore((state) => state.elementPicker);
   const stopElementPicker = useEditorStore((state) => state.stopElementPicker);
+  const isAiLayerPicking = useEditorStore((state) => state.isAiLayerPicking);
   const assets = useAssetsStore((state) => state.assets);
 
   // Note: Canvas drag-and-drop state is handled by useCanvasDropDetection hook
@@ -721,6 +731,23 @@ const CenterCanvas = React.memo(function CenterCanvas({
     setReportedContentWidth(0);
   }, [editingComponentId]);
 
+  // On component open, hide the canvas so the initial multi-pass auto-zoom isn't
+  // visible. Only keyed on editingComponentId — NOT on dimensions — so reveals
+  // during normal editing don't re-hide and blink the canvas.
+  useEffect(() => {
+    setIsComponentCanvasSettling(!!editingComponentId);
+  }, [editingComponentId]);
+
+  // While settling (just opened), reveal once measured dimensions hold steady
+  // (debounced). Runs only while settling, so editing-time dimension changes
+  // don't trigger it. Fires even with no change via the settling dependency.
+  useEffect(() => {
+    if (!editingComponentId || !isComponentCanvasSettling) return;
+    clearTimeout(componentSettleTimerRef.current);
+    componentSettleTimerRef.current = setTimeout(() => setIsComponentCanvasSettling(false), 200);
+    return () => clearTimeout(componentSettleTimerRef.current);
+  }, [editingComponentId, isComponentCanvasSettling, reportedContentWidth, reportedContentHeight]);
+
   const collectionItemsFromStore = useCollectionsStore((state) => state.items);
   const collectionsFromStore = useCollectionsStore((state) => state.collections);
   const collectionFieldsFromStore = useCollectionsStore((state) => state.fields);
@@ -768,6 +795,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
   } = useUndoRedo({
     entityType: undoRedoEntityType,
     entityId: undoRedoEntityId,
+    variantId: editingComponentId ? activeComponentVariantId : null,
     autoInit: true,
   });
 
@@ -1051,6 +1079,18 @@ const CenterCanvas = React.memo(function CenterCanvas({
     // across browsers, which avoids a noticeable lag before smooth scrolling begins.
     scrollEl.scrollTo({ top: Math.max(0, targetScroll), behavior: smooth ? 'smooth' : 'auto' });
   }, [canvasIframeElement]);
+
+  // Show a crosshair cursor inside the canvas while the AI composer is in
+  // "reference a layer" mode (the scroll container handles the area around it).
+  useEffect(() => {
+    if (!isAiLayerPicking) return;
+    const iframeDoc = canvasIframeElement?.contentDocument;
+    if (!iframeDoc?.body) return;
+    iframeDoc.body.style.cursor = 'crosshair';
+    return () => {
+      iframeDoc.body.style.cursor = '';
+    };
+  }, [isAiLayerPicking, canvasIframeElement]);
 
   const scrollCanvasToLayerRef = useRef(scrollCanvasToLayer);
   scrollCanvasToLayerRef.current = scrollCanvasToLayer;
@@ -2551,6 +2591,15 @@ const CenterCanvas = React.memo(function CenterCanvas({
           />
         )}
 
+        {/* AI activity overlay - shimmering outlines on layers the agent is editing */}
+        {!isPreviewMode && activeSidebarTab !== 'pages' && canvasIframeElement && (
+          <AiActivityOverlay
+            iframeElement={canvasIframeElement}
+            containerElement={scrollContainerRef.current}
+            zoom={zoom}
+          />
+        )}
+
         {/* Drag capture overlay - prevents iframe from swallowing mouse events during drag */}
         {!isPreviewMode && <DragCaptureOverlay />}
 
@@ -2571,10 +2620,11 @@ const CenterCanvas = React.memo(function CenterCanvas({
           ref={scrollContainerRef}
           className={cn(
             'absolute inset-0 z-0 overflow-auto',
-            elementPicker?.active && 'cursor-crosshair'
+            (elementPicker?.active || isAiLayerPicking) && 'cursor-crosshair'
           )}
           style={{
-            opacity: isCanvasReady ? 1 : 0,
+            opacity: isCanvasReady && !isComponentCanvasSettling ? 1 : 0,
+            transition: 'opacity 120ms ease-out',
             scrollbarWidth: 'none', // Firefox
             msOverflowStyle: 'none', // IE/Edge
             WebkitOverflowScrolling: 'touch',
@@ -2595,9 +2645,12 @@ const CenterCanvas = React.memo(function CenterCanvas({
               minWidth: '100%',
               minHeight: '100%',
               // When editing a component, center the canvas inside the scroll area.
+              // Rely on minHeight (not a fixed height) so the container grows with
+              // tall content — a fixed height:100% would keep the centered child
+              // overflowing past the unreachable top edge (flexbox centering clip).
               // Page editing keeps default block flow so absolute overlays anchor at the top.
               ...(editingComponentId
-                ? { display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }
+                ? { display: 'flex', alignItems: 'center', justifyContent: 'center' }
                 : null),
             }}
           >
@@ -2711,8 +2764,14 @@ const CenterCanvas = React.memo(function CenterCanvas({
                       {/* Sibling reorder indicator overlay - for drag-to-reorder on canvas */}
                       <CanvasSiblingReorderOverlay iframeElement={canvasIframeElement} />
 
+                      {/* Build skeleton: instant placeholder while the AI assembles
+                          the page, shown until the first real layers stream in. */}
+                      {isCanvasEmpty && aiBuildingPageId === currentPageId && (
+                        <CanvasBuildSkeleton />
+                      )}
+
                       {/* Empty overlay when only Body with no children */}
-                      {isCanvasEmpty && (
+                      {isCanvasEmpty && aiBuildingPageId !== currentPageId && (
                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
                           <div className="pointer-events-auto">
                             <Empty className="bg-transparent border-0 text-neutral-900">
@@ -2957,7 +3016,7 @@ const CenterCanvas = React.memo(function CenterCanvas({
         {/* Preview iframe area */}
         <div
           ref={previewContainerRef}
-          className="flex-1 relative flex items-start overflow-auto"
+          className="flex-1 relative flex items-start overflow-x-auto overflow-y-hidden"
           style={{ padding: `${CANVAS_BORDER}px` }}
         >
           {isPreviewLoading && (

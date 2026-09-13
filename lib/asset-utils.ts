@@ -392,12 +392,14 @@ const EDITOR_DEFAULT_IMAGE_QUALITY = 80;
 /**
  * Bitmap MIME types we want to size-cap through the proxy in the editor.
  * SVGs are skipped (vector, no decode cost) and videos/audio aren't bitmap
- * decoded at all.
+ * decoded at all. GIFs are skipped too — Sharp collapses animated GIFs to a
+ * single static frame, so downscaling would kill the animation.
  */
 function isBitmapImageMime(mimeType?: string | null): boolean {
   if (!mimeType) return false;
   if (!mimeType.startsWith('image/')) return false;
   if (mimeType === 'image/svg+xml') return false;
+  if (mimeType === 'image/gif') return false;
   return true;
 }
 
@@ -441,10 +443,19 @@ function isProxyUrl(url: string): boolean {
   return url.startsWith('/a/');
 }
 
+/** Cheap extension sniff: does the URL path end in `.gif`? */
+function isGifUrl(url: string): boolean {
+  const path = url.split('?')[0].split('#')[0].toLowerCase();
+  return path.endsWith('.gif');
+}
+
 /**
- * Check if a URL supports image transformation params
+ * Check if a URL supports image transformation params.
+ * GIFs are excluded — Sharp flattens animated GIFs to a single frame, so
+ * appending `width`/`quality` would break the animation.
  */
 function isTransformableUrl(url: string): boolean {
+  if (isGifUrl(url)) return false;
   if (isProxyUrl(url)) return true;
   try {
     const urlObj = new URL(url);
@@ -888,12 +899,11 @@ export function collectLayerAssetIds(
     const linkAssetId = layer.variables?.link?.asset?.id;
     addAssetId(linkAssetId);
 
-    // Lightbox file assets
-    if (layer.settings?.lightbox?.files) {
+    // Lightbox file assets (addAssetId guards non-string/non-UUID values,
+    // so nested arrays or external URLs are safely ignored)
+    if (Array.isArray(layer.settings?.lightbox?.files)) {
       for (const fileId of layer.settings.lightbox.files) {
-        if (fileId && !fileId.startsWith('http') && !fileId.startsWith('/')) {
-          addAssetId(fileId);
-        }
+        addAssetId(fileId);
       }
     }
 
