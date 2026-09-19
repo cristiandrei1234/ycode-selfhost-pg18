@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, memo } from 'react';
+import { useState, useEffect, memo } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup, ButtonGroupSeparator } from '@/components/ui/button-group';
 import {
@@ -16,17 +16,19 @@ import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import GridSpanRow from './GridSpanRow';
 import SettingsPanel from './SettingsPanel';
 import { useDesignSync } from '@/hooks/use-design-sync';
 import { useControlledInputs } from '@/hooks/use-controlled-input';
+import { useParentLayout } from '@/hooks/use-parent-layout';
 import { useEditorStore } from '@/stores/useEditorStore';
-import { usePagesStore } from '@/stores/usePagesStore';
-import { useComponentsStore } from '@/stores/useComponentsStore';
 import { extractMeasurementValue, formatMeasurementValue } from '@/lib/measurement-utils';
 import type { Layer } from '@/types';
 
 interface SizingControlsProps {
   layer: Layer | null;
+  /** Needed to show the grid Span row, which only applies inside a grid parent */
+  parentLayer?: Layer | null;
   onLayerUpdate: (layerId: string, updates: Partial<Layer>) => void;
 }
 
@@ -51,7 +53,7 @@ const OBJECT_POSITIONS: { value: string; label: string; icon: React.ComponentPro
   { value: 'right-bottom', label: 'Bottom right', icon: 'arrow-right-down' },
 ];
 
-const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: SizingControlsProps) {
+const SizingControls = memo(function SizingControls({ layer, parentLayer = null, onLayerUpdate }: SizingControlsProps) {
   const activeBreakpoint = useEditorStore((s) => s.activeBreakpoint);
   const activeUIState = useEditorStore((s) => s.activeUIState);
   const { updateDesignProperty, debouncedUpdateDesignProperty, getDesignProperty } = useDesignSync({
@@ -60,6 +62,7 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
     activeBreakpoint,
     activeUIState,
   });
+  const { isGrid: parentIsGrid } = useParentLayout(parentLayer);
 
   const [isOpen, setIsOpen] = useState(true);
 
@@ -322,61 +325,6 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
     updateDesignProperty('sizing', 'objectPosition', value === 'center' ? null : value);
   };
 
-  // Handle grid column span change
-  const handleGridColumnSpanChange = (value: string) => {
-    updateDesignProperty('sizing', 'gridColumnSpan', value || null);
-  };
-
-  // Handle grid row span change
-  const handleGridRowSpanChange = (value: string) => {
-    updateDesignProperty('sizing', 'gridRowSpan', value || null);
-  };
-
-  // Get store values
-  const currentPageId = useEditorStore((s) => s.currentPageId);
-  const editingComponentId = useEditorStore((s) => s.editingComponentId);
-  const editingComponentVariantId = useEditorStore((s) => s.editingComponentVariantId);
-  const draftsByPageId = usePagesStore((s) => s.draftsByPageId);
-  const componentDrafts = useComponentsStore((s) => s.componentDrafts);
-
-  // Check if parent layer has grid display
-  const parentHasGrid = useMemo(() => {
-    if (!layer) return false;
-
-    let layers: Layer[] = [];
-    if (editingComponentId) {
-      const variantDrafts = componentDrafts[editingComponentId];
-      const variantId = (editingComponentVariantId && variantDrafts?.[editingComponentVariantId])
-        ? editingComponentVariantId
-        : (variantDrafts ? Object.keys(variantDrafts)[0] : null);
-      layers = (variantId && variantDrafts) ? variantDrafts[variantId] || [] : [];
-    } else if (currentPageId) {
-      const draft = draftsByPageId[currentPageId];
-      layers = draft ? draft.layers : [];
-    }
-
-    if (!layers.length) return false;
-
-    // Find parent layer
-    const findParent = (tree: Layer[], targetId: string, parent: Layer | null = null): Layer | null => {
-      for (const node of tree) {
-        if (node.id === targetId) return parent;
-        if (node.children) {
-          const found = findParent(node.children, targetId, node);
-          if (found !== null) return found;
-        }
-      }
-      return null;
-    };
-
-    const parent = findParent(layers, layer.id);
-    if (!parent) return false;
-
-    // Check if parent has grid display
-    const parentDisplay = parent.design?.layout?.display;
-    return parentDisplay === 'Grid';
-  }, [layer, currentPageId, editingComponentId, draftsByPageId, componentDrafts]);
-
   return (
     <SettingsPanel
       title="Sizing" isOpen={isOpen}
@@ -399,58 +347,24 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
         </DropdownMenu>
       }
     >
-
-{parentHasGrid && (
-        <div className="grid grid-cols-3 items-start">
-          <Label variant="muted" className="h-8">Span</Label>
-          <div className="col-span-2 grid grid-cols-2 gap-2">
-            <Select value={gridColumnSpan} onValueChange={handleGridColumnSpanChange}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="1">1</SelectItem>
-                  <SelectItem value="2">2</SelectItem>
-                  <SelectItem value="3">3</SelectItem>
-                  <SelectItem value="4">4</SelectItem>
-                  <SelectItem value="5">5</SelectItem>
-                  <SelectItem value="6">6</SelectItem>
-                  <SelectItem value="7">7</SelectItem>
-                  <SelectItem value="8">8</SelectItem>
-                  <SelectItem value="9">9</SelectItem>
-                  <SelectItem value="10">10</SelectItem>
-                  <SelectItem value="11">11</SelectItem>
-                  <SelectItem value="12">12</SelectItem>
-                  <SelectItem value="full">Full</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <Select value={gridRowSpan} onValueChange={handleGridRowSpanChange}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="1">1</SelectItem>
-                  <SelectItem value="2">2</SelectItem>
-                  <SelectItem value="3">3</SelectItem>
-                  <SelectItem value="4">4</SelectItem>
-                  <SelectItem value="5">5</SelectItem>
-                  <SelectItem value="6">6</SelectItem>
-                  <SelectItem value="7">7</SelectItem>
-                  <SelectItem value="8">8</SelectItem>
-                  <SelectItem value="9">9</SelectItem>
-                  <SelectItem value="10">10</SelectItem>
-                  <SelectItem value="11">11</SelectItem>
-                  <SelectItem value="12">12</SelectItem>
-                  <SelectItem value="full">Full</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-)}
+      {parentIsGrid && layer && (
+        <>
+          <GridSpanRow
+            label="Columns"
+            layer={layer}
+            property="gridColumnSpan"
+            value={gridColumnSpan}
+            onChange={(property, value) => updateDesignProperty('sizing', property, value)}
+          />
+          <GridSpanRow
+            label="Rows"
+            layer={layer}
+            property="gridRowSpan"
+            value={gridRowSpan}
+            onChange={(property, value) => updateDesignProperty('sizing', property, value)}
+          />
+        </>
+      )}
 
       <div className="grid grid-cols-3 items-start">
         <Label variant="muted" className="h-8">Width</Label>
@@ -645,6 +559,7 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
                 <SelectItem value="visible">Visible</SelectItem>
                 <SelectItem value="hidden">Hidden</SelectItem>
                 <SelectItem value="scroll">Scroll</SelectItem>
+                <SelectItem value="ellipsis">Ellipsis</SelectItem>
                 <SelectItem value="auto">Auto</SelectItem>
               </SelectGroup>
             </SelectContent>
@@ -729,14 +644,13 @@ const SizingControls = memo(function SizingControls({ layer, onLayerUpdate }: Si
                 </SelectContent>
               </Select>
             </ButtonGroup>
-            <span
-              role="button"
-              tabIndex={0}
+            <button
+              type="button"
               className="p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
               onClick={handleRemoveAspectRatio}
             >
               <Icon name="x" className="size-2.5" />
-            </span>
+            </button>
           </div>
         </div>
       )}

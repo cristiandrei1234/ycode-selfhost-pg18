@@ -1,6 +1,7 @@
 import React from 'react';
 import type { Metadata } from 'next';
 import DarkModeProvider from '@/components/DarkModeProvider';
+import { htmlDirFromLang } from '@/lib/html-lang';
 
 export const defaultMetadata: Metadata = {
   title: 'Ycode - Visual Website Builder',
@@ -19,9 +20,8 @@ interface RootLayoutShellProps {
    */
   bodyClassName?: string;
   /**
-   * Language for the <html lang> attribute. Omitted for public published sites
-   * so the per-page locale (set on the content wrapper by PageRenderer) is the
-   * source of truth instead of a hardcoded `en`.
+   * Language for the <html lang> attribute. Published sites pass the locale
+   * resolved from the URL so lang and dir are present in the SSR HTML.
    */
   lang?: string;
 }
@@ -32,8 +32,14 @@ export default function RootLayoutShell({
   bodyClassName = 'font-sans antialiased',
   lang,
 }: RootLayoutShellProps) {
+  const dir = lang ? htmlDirFromLang(lang) : undefined;
+
   return (
-    <html lang={lang} suppressHydrationWarning>
+    <html
+      lang={lang}
+      dir={dir}
+      suppressHydrationWarning
+    >
       <head>
         {headElements}
       </head>

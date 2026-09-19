@@ -46,8 +46,8 @@ export async function getLayersByPageId(
 /**
  * Get draft layers for a page
  */
-export async function getDraftLayers(pageId: string): Promise<PageLayers | null> {
-  const client = await getSupabaseAdmin();
+export async function getDraftLayers(pageId: string, tenantId?: string): Promise<PageLayers | null> {
+  const client = await getSupabaseAdmin(tenantId);
 
   if (!client) {
     throw new Error('Supabase not configured');
@@ -76,8 +76,8 @@ export async function getDraftLayers(pageId: string): Promise<PageLayers | null>
 /**
  * Get published layers for a page
  */
-export async function getPublishedLayers(pageId: string): Promise<PageLayers | null> {
-  const client = await getSupabaseAdmin();
+export async function getPublishedLayers(pageId: string, tenantId?: string): Promise<PageLayers | null> {
+  const client = await getSupabaseAdmin(tenantId);
 
   if (!client) {
     throw new Error('Supabase not configured');

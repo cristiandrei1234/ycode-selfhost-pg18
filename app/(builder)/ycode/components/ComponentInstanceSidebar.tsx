@@ -33,6 +33,7 @@ import { usePagesStore } from '@/stores/usePagesStore';
 import { useEditComponent } from '@/hooks/use-edit-component';
 import { detachSpecificLayerFromComponent } from '@/lib/component-utils';
 import { collectVariantVariableOptions } from '@/lib/component-variant-utils';
+import { cn } from '@/lib/utils';
 import { EMPTY_OVERRIDES } from '@/lib/variable-utils';
 
 import type { Layer, ComponentVariable, Component, Collection, CollectionField } from '@/types';
@@ -48,6 +49,7 @@ interface ComponentInstanceSidebarProps {
   fields: Record<string, CollectionField[]>;
   collections: Collection[];
   isInsideCollectionLayer: boolean;
+  embedded?: boolean;
 }
 
 export default function ComponentInstanceSidebar({
@@ -60,6 +62,7 @@ export default function ComponentInstanceSidebar({
   fields,
   collections,
   isInsideCollectionLayer,
+  embedded = false,
 }: ComponentInstanceSidebarProps) {
   const editComponent = useEditComponent();
 
@@ -76,6 +79,8 @@ export default function ComponentInstanceSidebar({
   const addVideoVariable = useComponentsStore((state) => state.addVideoVariable);
   const addIconVariable = useComponentsStore((state) => state.addIconVariable);
   const addVariantVariable = useComponentsStore((state) => state.addVariantVariable);
+  const addVisibilityVariable = useComponentsStore((state) => state.addVisibilityVariable);
+  const addIdVariable = useComponentsStore((state) => state.addIdVariable);
   const updateTextVariable = useComponentsStore((state) => state.updateTextVariable);
 
   const setDraftLayers = usePagesStore((state) => state.setDraftLayers);
@@ -93,7 +98,7 @@ export default function ComponentInstanceSidebar({
 
   const allVariables = component.variables || [];
   const overrides = selectedLayer.componentOverrides;
-  const hasOverrides = ['text', 'rich_text', 'image', 'link', 'audio', 'video', 'icon', 'variant']
+  const hasOverrides = ['text', 'rich_text', 'image', 'link', 'audio', 'video', 'icon', 'variant', 'visibility', 'id']
     .some(cat => Object.keys(overrides?.[cat as keyof typeof overrides] || {}).length > 0);
 
   const handleEditMasterComponent = useCallback(async () => {
@@ -164,6 +169,8 @@ export default function ComponentInstanceSidebar({
     audio: addAudioVariable,
     video: addVideoVariable,
     icon: addIconVariable,
+    visibility: addVisibilityVariable,
+    id: addIdVariable,
   };
 
   const handleCreateOverrideVariable = useCallback(async (childVariable: ComponentVariable) => {
@@ -215,7 +222,14 @@ export default function ComponentInstanceSidebar({
   }, [selectedLayerId, onLayerUpdate]);
 
   return (
-    <div className="w-64 shrink-0 bg-background border-l flex flex-col p-4 pb-0 h-full overflow-hidden">
+    <div
+      className={cn(
+        'flex flex-col p-4 pb-0 overflow-hidden',
+        embedded
+          ? 'flex-1 min-h-0'
+          : 'w-64 shrink-0 bg-background border-l h-full',
+      )}
+    >
       <Tabs
         value=""
         className="flex flex-col min-h-0 gap-0!"

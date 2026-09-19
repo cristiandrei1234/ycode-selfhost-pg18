@@ -14,8 +14,9 @@ import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { SplitText } from 'gsap/SplitText';
 
 import { ITEMS_INJECTED_EVENT, type ItemsInjectedDetail } from '@/components/FilterableCollection';
-import { buildGsapProps, addTweenToTimeline, createSplitTextAnimation, generateInitialAnimationCSS, getEffectiveApplyStyle, setColorVariableResolver } from '@/lib/animation-utils';
-import { getCurrentBreakpoint } from '@/lib/breakpoint-utils';
+import { hideGsapElement, resetGsapDisplay, showGsapElement } from '@/lib/animation-display';
+import { buildGsapProps, addTweenToTimeline, collectKeptHiddenLayerIds, createSplitTextAnimation, generateInitialAnimationCSS, getEffectiveApplyStyle, setColorVariableResolver } from '@/lib/animation-utils';
+import { BREAKPOINT_VALUES, getCurrentBreakpoint } from '@/lib/breakpoint-utils';
 import { remapLayerIdsForCollectionItem } from '@/lib/collection-utils';
 import { useColorVariablesStore } from '@/stores/useColorVariablesStore';
 import type { Layer, LayerInteraction, Breakpoint } from '@/types';
@@ -68,6 +69,17 @@ function getElement(layerId: string): HTMLElement | null {
 }
 
 /**
+ * Whether a mutated node lives inside a Swiper slider. Swiper reshuffles
+ * existing slide nodes on transition/loop (childList mutations), which must
+ * not trigger an animation rebind — real new content arrives via the
+ * ITEMS_INJECTED_EVENT path instead.
+ */
+function isInsideSlider(node: Node | null): boolean {
+  const el = node instanceof Element ? node : node?.parentElement ?? null;
+  return !!el?.closest('[data-slider-id], .swiper-wrapper');
+}
+
+/**
  * Pre-paint each tween's `from` state so the element rests in its intended
  * initial appearance before the trigger fires. CSS via generateInitialAnimationCSS()
  * only covers intro triggers (load, scroll-into-view); for hover/click we apply
@@ -90,8 +102,14 @@ function applyInitialFromState(interaction: LayerInteraction): void {
  * Collect info about elements that should start hidden based on interactions
  * Returns a map of layerId -> breakpoints (null means all breakpoints)
  */
-function collectHiddenLayerInfo(interactions: CollectedInteraction[]): Map<string, string[] | null> {
+function collectHiddenLayerInfo(
+  interactions: CollectedInteraction[],
+  keptHiddenIds: Set<string>
+): Map<string, string[] | null> {
   const hiddenMap = new Map<string, string[] | null>();
+
+  // `settings.hidden` layers kept in the DOM are collapsed on every breakpoint
+  keptHiddenIds.forEach((layerId) => hiddenMap.set(layerId, null));
 
   interactions.forEach(({ interaction }) => {
     const breakpoints = interaction.timeline?.breakpoints || null;
@@ -101,7 +119,8 @@ function collectHiddenLayerInfo(interactions: CollectedInteraction[]): Map<strin
       // for intro triggers like load/scroll-into-view).
       if (
         tween.from?.display === 'hidden' &&
-        getEffectiveApplyStyle(interaction.trigger, 'display', tween.apply_styles) === 'on-load'
+        getEffectiveApplyStyle(interaction.trigger, 'display', tween.apply_styles) === 'on-load' &&
+        !keptHiddenIds.has(tween.layer_id)
       ) {
         hiddenMap.set(tween.layer_id, breakpoints);
       }
@@ -109,6 +128,31 @@ function collectHiddenLayerInfo(interactions: CollectedInteraction[]): Map<strin
   });
 
   return hiddenMap;
+}
+
+/**
+ * Layer IDs whose visibility is toggled by a user interaction (click/hover).
+ * Their live show/hide state must persist across breakpoint changes instead of
+ * reverting to the on-load default when animations reset on resize.
+ */
+function collectInteractiveDisplayTargets(interactions: CollectedInteraction[]): Set<string> {
+  const targets = new Set<string>();
+  interactions.forEach(({ interaction }) => {
+    if (interaction.trigger !== 'click' && interaction.trigger !== 'hover') return;
+    (interaction.tweens || []).forEach((tween) => {
+      if (tween.from?.display || tween.to?.display) targets.add(tween.layer_id);
+    });
+  });
+  return targets;
+}
+
+/**
+ * Whether an on-load hide applies uniformly to every breakpoint (or not at all).
+ * Breakpoint-specific hides carry responsive intent that the per-breakpoint
+ * reset must honor, so a user toggle should not be preserved over them.
+ */
+function isUniformOnLoadHide(breakpoints: string[] | null | undefined): boolean {
+  return breakpoints == null || BREAKPOINT_VALUES.every((bp) => breakpoints.includes(bp));
 }
 
 /**
@@ -143,10 +187,10 @@ function resetAnimationStates(
 
       if (shouldBeHidden) {
         // Restore hidden state with breakpoint info
-        element.setAttribute('data-gsap-hidden', hiddenBreakpoints?.join(' ') || '');
+        hideGsapElement(element, hiddenBreakpoints?.join(' ') || '');
       } else {
-        // Remove hidden state - not applicable to this breakpoint
-        element.removeAttribute('data-gsap-hidden');
+        // Back to the authored state - not hidden at this breakpoint
+        resetGsapDisplay(element);
       }
     }
   });
@@ -278,7 +322,7 @@ function buildTimeline(interaction: LayerInteraction): gsap.core.Timeline | null
       splitText: splitTextConfig,
       splitElements,
       onComplete: displayEnd === 'hidden'
-        ? () => element.setAttribute('data-gsap-hidden', '')
+        ? () => hideGsapElement(element)
         : undefined,
     });
   });
@@ -289,7 +333,7 @@ function buildTimeline(interaction: LayerInteraction): gsap.core.Timeline | null
     timeline.eventCallback('onStart', () => {
       displayTransitions.forEach(({ element, displayEnd }) => {
         if (displayEnd === 'visible') {
-          element.removeAttribute('data-gsap-hidden');
+          showGsapElement(element);
         }
       });
     });
@@ -299,9 +343,9 @@ function buildTimeline(interaction: LayerInteraction): gsap.core.Timeline | null
       timeline.eventCallback('onReverseComplete', () => {
         displayTransitions.forEach(({ element, displayStart }) => {
           if (displayStart === 'hidden') {
-            element.setAttribute('data-gsap-hidden', '');
+            hideGsapElement(element);
           } else {
-            element.removeAttribute('data-gsap-hidden');
+            showGsapElement(element);
           }
         });
       });
@@ -407,7 +451,7 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
       hiddenLayerInfo.forEach(({ layerId, breakpoints }) => {
         const el = getElement(layerId);
         if (el) {
-          el.setAttribute('data-gsap-hidden', breakpoints || '');
+          hideGsapElement(el, breakpoints || '');
         }
       });
     }
@@ -432,12 +476,36 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
 
   useEffect(() => {
     const collectedInteractions = collectInteractions(effectiveLayers);
-    const hiddenLayerInfo = collectHiddenLayerInfo(collectedInteractions);
+    const hiddenLayerInfo = collectHiddenLayerInfo(collectedInteractions, collectKeptHiddenLayerIds(effectiveLayers));
     const isBreakpointChange = prevBreakpointRef.current !== null && prevBreakpointRef.current !== currentBreakpoint;
 
     // Reset animation states when breakpoint changes
     if (isBreakpointChange) {
+      // Snapshot user-toggled show/hide state (e.g. tab switchers) before the
+      // reset wipes it, so a resize crossing a breakpoint doesn't revert
+      // click/hover toggles back to their on-load default.
+      const interactiveDisplayTargets = collectInteractiveDisplayTargets(collectedInteractions);
+      const toggledDisplayState = new Map<string, string | null>();
+      interactiveDisplayTargets.forEach((layerId) => {
+        // Skip breakpoint-specific on-load hides so responsive intent still resets.
+        if (!isUniformOnLoadHide(hiddenLayerInfo.get(layerId))) return;
+        const el = getElement(layerId);
+        if (el) toggledDisplayState.set(layerId, el.getAttribute('data-gsap-hidden'));
+      });
+
       resetAnimationStates(collectedInteractions, hiddenLayerInfo, currentBreakpoint);
+
+      // Restore the captured visibility so the user's current selection survives.
+      toggledDisplayState.forEach((value, layerId) => {
+        const el = getElement(layerId);
+        if (!el) return;
+        if (value === null) {
+          showGsapElement(el);
+        } else {
+          hideGsapElement(el, value);
+        }
+      });
+
       playedOneShotInteractionsRef.current = new Set();
     }
 
@@ -663,6 +731,10 @@ export default function AnimationInitializer({ layers, injectInitialCSS }: Anima
     const remountObserver = new MutationObserver(mutations => {
       for (const m of mutations) {
         if (m.type !== 'childList') continue;
+        // Skip Swiper's internal slide reshuffling (loop/transition) so a
+        // slide change doesn't rebind animations and reset user-toggled
+        // click/hover states (e.g. an open nav menu) elsewhere on the page.
+        if (isInsideSlider(m.target)) continue;
         for (const n of m.addedNodes) {
           if (containsTrackedId(n)) {
             scheduleRebind();

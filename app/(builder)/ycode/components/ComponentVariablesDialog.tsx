@@ -34,6 +34,7 @@ import LinkSettings, { type LinkSettingsValue } from './LinkSettings';
 import AudioSettings, { type AudioSettingsValue } from './AudioSettings';
 import VideoSettings, { type VideoSettingsValue } from './VideoSettings';
 import IconSettings, { type IconSettingsValue } from './IconSettings';
+import VisibilityToggle from './VisibilityToggle';
 import {
   Select,
   SelectContent,
@@ -44,12 +45,13 @@ import {
 
 import { useComponentsStore } from '@/stores/useComponentsStore';
 import { useCollectionsStore } from '@/stores/useCollectionsStore';
-import { createTextComponentVariableValue, extractTiptapFromComponentVariable } from '@/lib/variable-utils';
+import { createTextComponentVariableValue, extractTiptapFromComponentVariable, isIdValue, isVisibilityValue } from '@/lib/variable-utils';
 import { collectVariantVariableOptions } from '@/lib/component-variant-utils';
 import { VARIABLE_TYPE_ICONS } from './ComponentVariableLabel';
 import { Separator } from '@/components/ui/separator';
+import { sanitizeHtmlId } from '@/lib/html-utils';
 import { cn } from '@/lib/utils';
-import type { ComponentVariable, VariantSettingsValue } from '@/types';
+import type { ComponentVariable, IdSettingsValue, VariantSettingsValue, VisibilitySettingsValue } from '@/types';
 
 /** Sortable variable item in the sidebar list. */
 function SortableVariableItem({
@@ -136,6 +138,8 @@ export default function ComponentVariablesDialog({
   const addVideoVariable = useComponentsStore((state) => state.addVideoVariable);
   const addIconVariable = useComponentsStore((state) => state.addIconVariable);
   const addVariantVariable = useComponentsStore((state) => state.addVariantVariable);
+  const addVisibilityVariable = useComponentsStore((state) => state.addVisibilityVariable);
+  const addIdVariable = useComponentsStore((state) => state.addIdVariable);
   const updateTextVariable = useComponentsStore((state) => state.updateTextVariable);
   const reorderVariables = useComponentsStore((state) => state.reorderVariables);
   const deleteTextVariable = useComponentsStore((state) => state.deleteTextVariable);
@@ -151,6 +155,9 @@ export default function ComponentVariablesDialog({
   const [editingName, setEditingName] = useState('');
   const [editingPlaceholder, setEditingPlaceholder] = useState('');
   const [editingDefaultValue, setEditingDefaultValue] = useState<any>(null);
+  // Local state for the 'id' default input so typing isn't overwritten by the
+  // async store update after each keystroke
+  const [editingIdDefault, setEditingIdDefault] = useState('');
 
   // Get component and its variables
   const component = componentId ? getComponentById(componentId) : undefined;
@@ -174,16 +181,19 @@ export default function ComponentVariablesDialog({
         setEditingName(target.name);
         setEditingPlaceholder(target.placeholder || '');
         setEditingDefaultValue(extractTiptapFromComponentVariable(target.default_value));
+        setEditingIdDefault(isIdValue(target.default_value) ? target.default_value.id : '');
       } else if (textVariables.length > 0) {
         setSelectedVariableId(textVariables[0].id);
         setEditingName(textVariables[0].name);
         setEditingPlaceholder(textVariables[0].placeholder || '');
         setEditingDefaultValue(extractTiptapFromComponentVariable(textVariables[0].default_value));
+        setEditingIdDefault(isIdValue(textVariables[0].default_value) ? textVariables[0].default_value.id : '');
       } else {
         setSelectedVariableId(null);
         setEditingName('');
         setEditingPlaceholder('');
         setEditingDefaultValue(getEmptyTiptapDoc());
+        setEditingIdDefault('');
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -195,6 +205,7 @@ export default function ComponentVariablesDialog({
       setEditingName(selectedVariable.name);
       setEditingPlaceholder(selectedVariable.placeholder || '');
       setEditingDefaultValue(extractTiptapFromComponentVariable(selectedVariable.default_value));
+      setEditingIdDefault(isIdValue(selectedVariable.default_value) ? selectedVariable.default_value.id : '');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedVariableId]);
@@ -284,10 +295,49 @@ export default function ComponentVariablesDialog({
     }
   };
 
+  const handleAddVisibilityVariable = async () => {
+    if (!componentId) return;
+
+    const newId = await addVisibilityVariable(componentId, 'Visibility');
+    if (newId) {
+      setSelectedVariableId(newId);
+      setEditingName('Visibility');
+    }
+  };
+
   const handleVariantDefaultValueChange = (variantId: string) => {
     if (!componentId || !selectedVariableId) return;
     const value: VariantSettingsValue = { variant_id: variantId };
     updateTextVariable(componentId, selectedVariableId, { default_value: value });
+  };
+
+  const handleVisibilityDefaultValueChange = (visible: boolean) => {
+    if (!componentId || !selectedVariableId) return;
+    const value: VisibilitySettingsValue = { visible };
+    updateTextVariable(componentId, selectedVariableId, { default_value: value });
+  };
+
+  const handleAddIdVariable = async () => {
+    if (!componentId) return;
+
+    const newId = await addIdVariable(componentId, 'ID');
+    if (newId) {
+      setSelectedVariableId(newId);
+      setEditingName('ID');
+    }
+  };
+
+  const handleIdDefaultValueChange = (raw: string) => {
+    setEditingIdDefault(sanitizeHtmlId(raw));
+  };
+
+  // Save id default on blur (same as name/placeholder) to avoid a PUT per keystroke
+  const handleIdDefaultValueBlur = async () => {
+    if (!componentId || !selectedVariableId) return;
+    const current = isIdValue(selectedVariable?.default_value) ? selectedVariable.default_value.id : '';
+    if (current === editingIdDefault) return;
+    const value: IdSettingsValue = { id: editingIdDefault };
+    await updateTextVariable(componentId, selectedVariableId, { default_value: value });
   };
 
   // Handle image default value change (via ImageSettings standalone mode)
@@ -443,6 +493,14 @@ export default function ComponentVariablesDialog({
                       <Icon name={VARIABLE_TYPE_ICONS['variant']} className="size-3" />
                       Variant
                     </DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleAddVisibilityVariable}>
+                      <Icon name={VARIABLE_TYPE_ICONS['visibility']} className="size-3" />
+                      Visibility
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleAddIdVariable}>
+                      <Icon name={VARIABLE_TYPE_ICONS['id']} className="size-3" />
+                      ID
+                    </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
@@ -554,6 +612,19 @@ export default function ComponentVariablesDialog({
                         mode="standalone"
                         value={selectedVariable.default_value as IconSettingsValue}
                         onChange={handleIconDefaultValueChange}
+                      />
+                    ) : selectedVariable.type === 'visibility' ? (
+                      <VisibilityToggle
+                        visible={isVisibilityValue(selectedVariable.default_value) ? selectedVariable.default_value.visible : true}
+                        onChange={handleVisibilityDefaultValueChange}
+                      />
+                    ) : selectedVariable.type === 'id' ? (
+                      <Input
+                        type="text"
+                        value={editingIdDefault}
+                        onChange={(e) => handleIdDefaultValueChange(e.target.value)}
+                        onBlur={handleIdDefaultValueBlur}
+                        placeholder="Element ID"
                       />
                     ) : selectedVariable.type === 'variant' ? (() => {
                       const options = collectVariantVariableOptions(component, allComponents, selectedVariable.id);

@@ -13,7 +13,6 @@ import { resolveFieldFromSources } from '@/lib/cms-variables-utils';
 import { compareDateFilter, isDateFieldType, isDatePreset, parseItemIdList, resolveDateFilterValue } from '@/lib/collection-field-utils';
 import { parseMultiReferenceValue, normalizeBooleanValue } from '@/lib/collection-utils';
 import { getInheritedValue } from '@/lib/tailwind-class-mapper';
-import cloneDeep from 'lodash/cloneDeep';
 import { layerHasLink, hasLinkInTree, hasRichTextLinks } from '@/lib/link-utils';
 import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
 
@@ -463,6 +462,38 @@ export function containsLayerId(layer: Layer, targetId: string): boolean {
   return layer.children?.some(child => containsLayerId(child, targetId)) ?? false;
 }
 
+/** Collect every layer id in a tree into a Set (used to diff trees). */
+export function collectLayerIdSet(layers: Layer[], set: Set<string> = new Set()): Set<string> {
+  for (const layer of layers) {
+    set.add(layer.id);
+    if (layer.children) collectLayerIdSet(layer.children, set);
+  }
+  return set;
+}
+
+/**
+ * Find every newly-added layer between two versions of a tree, in document
+ * (pre-order) order — parents before children, top to bottom.
+ *
+ * Returns all ids present in `newLayers` but not `oldLayers`. The document order
+ * lets the canvas reveal a freshly-built section step by step (container first,
+ * then its contents) so it reads as if the page is being assembled live.
+ */
+export function findAddedLayerIds(oldLayers: Layer[], newLayers: Layer[]): string[] {
+  const oldIds = collectLayerIdSet(oldLayers);
+  const added: string[] = [];
+
+  const walk = (siblings: Layer[]) => {
+    for (const layer of siblings) {
+      if (!oldIds.has(layer.id)) added.push(layer.id);
+      if (layer.children) walk(layer.children);
+    }
+  };
+
+  walk(newLayers);
+  return added;
+}
+
 /**
  * Collect all element IDs from a layer tree (both settings.id and attributes.id)
  * Used for generating unique IDs for new elements
@@ -631,6 +662,54 @@ export function isTextEditable(layer: Layer): boolean {
 export function isTextContentLayer(layer: Layer | null | undefined): boolean {
   if (!layer) return false;
   return layer.name === 'heading' || layer.name === 'text';
+}
+
+/** Auto-assigned layer labels that should track the text/heading element type. */
+const AUTO_TEXT_HEADING_LABELS = new Set(['Text', 'Heading']);
+
+/**
+ * Build the props to convert a text layer into a heading (or the reverse).
+ * Switches the element `name` and its default HTML tag while preserving
+ * content, classes, and design.
+ *
+ * Only genuine block-level text and headings qualify: inline text used as
+ * button captions, alert messages, or labels (tag `span`/`label`) is excluded
+ * so conversion never emits an `<h2>` inside a `<button>` or `<p>`.
+ *
+ * An auto-assigned "Text"/"Heading" label is dropped so the layer shows its
+ * text content in the Layers panel; a user's custom layer name is preserved.
+ */
+export function getTextHeadingConversion(
+  layer: Layer | null | undefined
+): Pick<Layer, 'name' | 'settings' | 'customName'> | null {
+  if (!layer) return null;
+
+  // Drop an auto-assigned "Text"/"Heading" label so the converted layer shows
+  // its content again; keep a user-defined custom name.
+  const clearLabel = !!layer.customName && AUTO_TEXT_HEADING_LABELS.has(layer.customName);
+
+  // Heading (incl. legacy text with an h1-h6 tag) → paragraph text.
+  if (isHeadingLayer(layer)) {
+    return {
+      name: 'text',
+      settings: { ...layer.settings, tag: 'p' },
+      ...(clearLabel ? { customName: undefined } : {}),
+    };
+  }
+
+  // Block-level paragraph text → heading (skip inline span/label variants).
+  if (layer.name === 'text') {
+    const tag = layer.settings?.tag;
+    if (!tag || tag === 'p') {
+      return {
+        name: 'heading',
+        settings: { ...layer.settings, tag: 'h2' },
+        ...(clearLabel ? { customName: undefined } : {}),
+      };
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -1145,6 +1224,9 @@ function layerLabelFallback(layer: Layer): string {
   return layer.customName || layer.name;
 }
 
+/** Layer types rendered as iframes, where a wrapping link can't receive clicks. */
+export const LINK_UNSUPPORTED_LAYER_NAMES = new Set(['htmlEmbed', 'map']);
+
 /**
  * Check if a layer can have a link added
  * @param layer - The layer to check
@@ -1156,8 +1238,18 @@ export function canLayerHaveLink(
   layer: Layer,
   allLayers: Layer[],
   type: 'layer' | 'richText' = 'layer'
-): { canHaveLinks: boolean; issue?: { type: 'self' | 'ancestor' | 'child' | 'richText'; layerName?: string } } {
+): { canHaveLinks: boolean; issue?: { type: 'self' | 'ancestor' | 'child' | 'richText' | 'unsupported'; layerName?: string } } {
   if (type === 'layer') {
+    // Iframe-based layers (Code embed, Map) capture pointer events, so a
+    // wrapping <a> never receives the click — a layer-level link would
+    // silently do nothing. Block it rather than offer a broken affordance.
+    if (LINK_UNSUPPORTED_LAYER_NAMES.has(layer.name)) {
+      return {
+        canHaveLinks: false,
+        issue: { type: 'unsupported' }
+      };
+    }
+
     // Checking if a layer-level link can be added
     // Can't add layer link if the layer has rich text links
     if (hasRichTextLinks(layer)) {
@@ -1279,6 +1371,24 @@ export function canPasteIntoParent(layers: Layer[], parentId: string, childToPas
 /**
  * Check if a layer can have children based on its name/type
  */
+/** Layer types that never contain child layers (media, text, form controls, embeds). */
+const LEAF_LAYER_NAMES = new Set([
+  'icon', 'image', 'audio', 'video', 'iframe',
+  'heading', 'text', 'richText', 'span', 'label', 'hr',
+  'input', 'textarea', 'select', 'checkbox', 'radio',
+  'htmlEmbed', 'map',
+]);
+
+/**
+ * Whether a layer is a leaf element by type (cannot contain children).
+ * Unlike canHaveChildren this ignores component instances, so it describes
+ * the element itself rather than whether the editor allows nesting into it.
+ */
+export function isLeafLayer(layer: Layer | null | undefined): boolean {
+  if (!layer) return false;
+  return LEAF_LAYER_NAMES.has(layer.name ?? '');
+}
+
 export function canHaveChildren(layer: Layer, childLayerType?: string): boolean {
   // Component instances cannot have children added to them
   // Children can only be edited in the master component
@@ -1286,19 +1396,12 @@ export function canHaveChildren(layer: Layer, childLayerType?: string): boolean 
     return false;
   }
 
-  const blocksWithoutChildren = [
-    'icon', 'image', 'audio', 'video', 'iframe',
-    'heading', 'text', 'richText', 'span', 'label', 'hr',
-    'input', 'textarea', 'select', 'checkbox', 'radio',
-    'htmlEmbed', 'map',
-  ];
-
   // Sections cannot contain other sections
   if (layer.name === 'section' && childLayerType === 'section') {
     return false;
   }
 
-  return !blocksWithoutChildren.includes(layer.name ?? '');
+  return !isLeafLayer(layer);
 }
 
 /**
@@ -1696,11 +1799,11 @@ const LAYER_NAME_TO_HTML_TAG: Record<string, string> = {
   slides: 'div',
   slide: 'div',
   slideNavigationWrapper: 'div',
-  slideButtonPrev: 'div',
-  slideButtonNext: 'div',
+  slideButtonPrev: 'button',
+  slideButtonNext: 'button',
   slidePaginationWrapper: 'div',
   slideBullets: 'div',
-  slideBullet: 'div',
+  slideBullet: 'button',
   slideFraction: 'div',
 
   // Lightbox
@@ -1717,16 +1820,33 @@ const LAYER_NAME_TO_HTML_TAG: Record<string, string> = {
   radio: 'input',
 };
 
-export function getLayerHtmlTag(layer: Layer): string {
+export function getLayerHtmlTag(layer: Layer, parentName?: string): string {
   if (layer.id === 'body' || layer.name === 'body') {
     return 'div';
   }
 
   if (layer.settings?.tag) {
-    return layer.settings.tag;
+    return coerceSliderNavChildTag(layer.settings.tag, layer, parentName);
   }
 
-  return LAYER_NAME_TO_HTML_TAG[layer.name] || layer.name || 'div';
+  const tag = LAYER_NAME_TO_HTML_TAG[layer.name] || layer.name || 'div';
+  return coerceSliderNavChildTag(tag, layer, parentName);
+}
+
+/**
+ * Prev/next slider wrappers render as <button>. Their visual child is stored
+ * as a `div`, which is invalid inside a button — coerce it to `span`.
+ */
+function coerceSliderNavChildTag(tag: string, layer: Layer, parentName?: string): string {
+  if (
+    (parentName === 'slideButtonPrev' || parentName === 'slideButtonNext')
+    && layer.name === 'div'
+    && tag === 'div'
+  ) {
+    return 'span';
+  }
+
+  return tag;
 }
 
 /**
@@ -2412,10 +2532,17 @@ function tagLayerSubtreeWithComponentId(layer: Layer, componentId: string): Laye
  */
 function transformLayersForInstance(
   layers: Layer[],
-  instanceLayerId: string
+  instanceLayerId: string,
+  rootMasterId?: string,
 ): Layer[] {
   // Build ID map: original ID -> instance-specific ID
   const idMap = new Map<string, string>();
+
+  // The component root renders with the instance ID, so map its master ID
+  // to the instance ID for child tweens/interactions that target the root.
+  if (rootMasterId && rootMasterId !== instanceLayerId) {
+    idMap.set(rootMasterId, instanceLayerId);
+  }
 
   // First pass: collect all layer IDs and generate new ones
   const collectIds = (layerList: Layer[]) => {
@@ -2509,7 +2636,7 @@ function resolveComponentsInLayers(
         // Transform all component children with instance-specific IDs
         // This ensures unique layer IDs when multiple instances of the same component exist
         const transformedChildren = componentContent.children
-          ? transformLayersForInstance(componentContent.children, layer.id)
+          ? transformLayersForInstance(componentContent.children, layer.id, componentContent.id)
           : [];
 
         // Recursively resolve any nested components within the transformed children
@@ -2731,50 +2858,6 @@ export function assignOrderClassToNewLayer(
 }
 
 /**
- * Creates a component via API and returns the result
- */
-export async function createComponentViaApi(
-  componentName: string,
-  layers: Layer[]
-): Promise<Component | null> {
-  try {
-    const response = await fetch('/ycode/api/components', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: componentName,
-        layers: layers.map(layer => cloneDeep(layer)),
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
-      try {
-        const errorJson = JSON.parse(errorText);
-        errorMessage = errorJson.error || errorMessage;
-      } catch {
-        errorMessage = errorText || errorMessage;
-      }
-      console.error('Failed to create component:', errorMessage);
-      return null;
-    }
-
-    const result = await response.json();
-
-    if (result.error || !result.data) {
-      console.error('Failed to create component:', result.error);
-      return null;
-    }
-
-    return result.data;
-  } catch (error) {
-    console.error('Failed to create component:', error);
-    return null;
-  }
-}
-
-/**
  * Replaces a layer with a component instance in a layer tree
  */
 export function replaceLayerWithComponentInstance(
@@ -2784,8 +2867,11 @@ export function replaceLayerWithComponentInstance(
 ): Layer[] {
   return layers.map((layer) => {
     if (layer.id === layerId) {
+      // Drop the original customName so the instance shows the component's
+      // name instead of the layer's previous rename.
+      const { customName: _customName, ...rest } = layer;
       return {
-        ...layer,
+        ...rest,
         componentId,
         children: [],
       };
@@ -4350,6 +4436,23 @@ export function updateLayerProps(
     }
     if (layer.children && layer.children.length > 0) {
       return { ...layer, children: updateLayerProps(layer.children, targetId, props) };
+    }
+    return layer;
+  });
+}
+
+/** Append a child to the parent layer with `parentId`, returning a new tree. */
+export function addChildToLayerTree(
+  layers: Layer[],
+  parentId: string,
+  child: Layer
+): Layer[] {
+  return layers.map(layer => {
+    if (layer.id === parentId) {
+      return { ...layer, children: [...(layer.children || []), child] };
+    }
+    if (layer.children && layer.children.length > 0) {
+      return { ...layer, children: addChildToLayerTree(layer.children, parentId, child) };
     }
     return layer;
   });

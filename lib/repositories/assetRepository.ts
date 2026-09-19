@@ -1,6 +1,7 @@
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { SUPABASE_IN_FILTER_CHUNK_SIZE, SUPABASE_QUERY_LIMIT, SUPABASE_WRITE_BATCH_SIZE } from '@/lib/supabase-constants';
 import { STORAGE_BUCKET, STORAGE_FOLDERS } from '@/lib/asset-constants';
+import { getInlineSvgAssetVersion } from '@/lib/asset-utils';
 import { cleanupOrphanedStorageFiles } from '@/lib/storage-utils';
 import { chunk } from '@/lib/utils';
 import { generateAssetContentHash } from '../hash-utils';
@@ -177,8 +178,8 @@ export async function getAllAssets(folderId?: string | null): Promise<Asset[]> {
  * @param id Asset ID
  * @param isPublished If true, get published version; if false, get draft version (default: false)
  */
-export async function getAssetById(id: string, isPublished: boolean = false): Promise<Asset | null> {
-  const client = await getSupabaseAdmin();
+export async function getAssetById(id: string, isPublished: boolean = false, tenantId?: string): Promise<Asset | null> {
+  const client = await getSupabaseAdmin(tenantId);
 
   if (!client) {
     throw new Error('Supabase not configured');
@@ -207,11 +208,17 @@ export async function getAssetById(id: string, isPublished: boolean = false): Pr
   return data;
 }
 
+export type ProxyAsset = Pick<Asset, 'id' | 'filename' | 'storage_path' | 'mime_type' | 'content' | 'width' | 'height' | 'is_published'>;
+
 /**
- * Get minimal asset info for proxy serving (ignores publish state)
- * Returns the first matching non-deleted record since both draft/published share the same storage_path
+ * Fetch the fields the `/a/` proxy needs to serve an asset.
+ *
+ * Draft and published rows share an id. Storage-backed assets point at the
+ * same file either way, but inline-SVG `content` can differ between them, so
+ * when the URL carries a `?v=` version (see getInlineSvgAssetVersion) the row
+ * whose bytes produce that version wins; otherwise the published row is preferred.
  */
-export async function getAssetForProxy(id: string): Promise<Pick<Asset, 'id' | 'filename' | 'storage_path' | 'mime_type'> | null> {
+export async function getAssetForProxy(id: string, version?: string | null): Promise<ProxyAsset | null> {
   const client = await getSupabaseAdmin();
 
   if (!client) {
@@ -220,16 +227,21 @@ export async function getAssetForProxy(id: string): Promise<Pick<Asset, 'id' | '
 
   const { data, error } = await client
     .from('assets')
-    .select('id, filename, storage_path, mime_type')
+    .select('id, filename, storage_path, mime_type, content, width, height, is_published')
     .eq('id', id)
     .is('deleted_at', null)
-    .limit(1);
+    .limit(2);
 
   if (error || !data?.length) {
     return null;
   }
 
-  return data[0];
+  const rows = data as ProxyAsset[];
+  const byVersion = version
+    ? rows.find((row) => getInlineSvgAssetVersion(row) === version)
+    : undefined;
+
+  return byVersion ?? rows.find((row) => row.is_published) ?? rows[0];
 }
 
 /**
@@ -763,6 +775,72 @@ export async function getUnpublishedAssets(): Promise<Asset[]> {
     }
     return draft.content_hash !== publishedHashById.get(draft.id);
   });
+}
+
+/**
+ * Count unpublished assets from id/hash only — not file payloads or SVG content.
+ */
+export async function getUnpublishedAssetsCount(): Promise<number> {
+  const client = await getSupabaseAdmin();
+
+  if (!client) {
+    throw new Error('Supabase not configured');
+  }
+
+  const draftAssets: Array<{ id: string; content_hash: string | null }> = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await client
+      .from('assets')
+      .select('id, content_hash')
+      .eq('is_published', false)
+      .is('deleted_at', null)
+      .order('id', { ascending: true })
+      .range(offset, offset + SUPABASE_QUERY_LIMIT - 1);
+
+    if (error) {
+      throw new Error(`Failed to fetch draft assets: ${error.message}`);
+    }
+
+    const batch = data || [];
+    draftAssets.push(...batch);
+
+    if (batch.length < SUPABASE_QUERY_LIMIT) break;
+    offset += SUPABASE_QUERY_LIMIT;
+  }
+
+  if (draftAssets.length === 0) {
+    return 0;
+  }
+
+  const publishedHashById = new Map<string, string | null>();
+  const draftIds = draftAssets.map((asset) => asset.id);
+  const PUBLISHED_ASSET_HASH_BATCH_SIZE = 200;
+
+  for (let i = 0; i < draftIds.length; i += PUBLISHED_ASSET_HASH_BATCH_SIZE) {
+    const batchIds = draftIds.slice(i, i + PUBLISHED_ASSET_HASH_BATCH_SIZE);
+    const { data: publishedAssets, error: publishedError } = await client
+      .from('assets')
+      .select('id, content_hash')
+      .in('id', batchIds)
+      .eq('is_published', true);
+
+    if (publishedError) {
+      throw new Error(`Failed to fetch published assets: ${publishedError.message}`);
+    }
+
+    publishedAssets?.forEach((asset) => publishedHashById.set(asset.id, asset.content_hash));
+  }
+
+  let count = 0;
+  for (const draft of draftAssets) {
+    if (!publishedHashById.has(draft.id) || draft.content_hash !== publishedHashById.get(draft.id)) {
+      count++;
+    }
+  }
+
+  return count;
 }
 
 /**

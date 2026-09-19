@@ -33,10 +33,12 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 
 // 4. Internal components
 import AddAttributeModal from './AddAttributeModal';
+import AdvancedSettings from './AdvancedSettings';
 import BackgroundsControls from './BackgroundsControls';
 import CustomAttributeRow from './CustomAttributeRow';
 import BorderControls from './BorderControls';
 import ComponentVariablesDialog from './ComponentVariablesDialog';
+import CursorControls from './CursorControls';
 import EffectControls from './EffectControls';
 import CollectionFiltersSettings from './CollectionFiltersSettings';
 import ConditionalVisibilitySettings from './ConditionalVisibilitySettings';
@@ -61,6 +63,7 @@ import ExpandableRichTextEditor from './ExpandableRichTextEditor';
 import RichTextEditor from './RichTextEditor';
 import ComponentVariableLabel, { VARIABLE_TYPE_ICONS } from './ComponentVariableLabel';
 import InteractionsPanel from './InteractionsPanel';
+import FlexChildControls from './FlexChildControls';
 import LayoutControls from './LayoutControls';
 import LayerStylesPanel from './LayerStylesPanel';
 import PositionControls from './PositionControls';
@@ -70,6 +73,8 @@ import SettingsPanel from './SettingsPanel';
 import SizingControls from './SizingControls';
 import SpacingControls from './SpacingControls';
 import ToggleGroup from './ToggleGroup';
+import IdSetting from './IdSetting';
+import VisibilitySetting from './VisibilitySetting';
 import TypographyControls from './TypographyControls';
 import UIStateSelector from './UIStateSelector';
 
@@ -96,7 +101,6 @@ import { getStyleIds } from '@/lib/layer-style-utils';
 import { resolveLayerClasses, chipClasses } from '@/lib/layer-style-resolve';
 import { buildDesign } from '@/lib/import/design';
 import { cn } from '@/lib/utils';
-import { sanitizeHtmlId } from '@/lib/html-utils';
 import { isFieldVariable, getCollectionVariable, findParentCollectionLayer, findAllParentCollectionLayers, isTextEditable, isTextContentLayer, isRichTextLayer, isHeadingLayer, findLayerWithParent, resetBindingsOnCollectionSourceChange, isInputInsideFilter, resolveFilterInputId, getLayerIndexes, indexedFindLayerById, indexedFindLayerWithParent, indexedFindParentCollectionLayer } from '@/lib/layer-utils';
 import { detachSpecificLayerFromComponent } from '@/lib/component-utils';
 import { convertContentToValue, parseValueToContent } from '@/lib/cms-variables-utils';
@@ -108,7 +112,7 @@ import { buildFieldGroupsForLayer, getFieldIcon, hasBoundCollectionSource, isMul
 import { getInverseReferenceFields } from '@/lib/collection-utils';
 
 // 7. Types
-import type { Layer, FieldVariable, CollectionField, CollectionVariable, ComponentVariable } from '@/types';
+import type { Layer, FieldVariable, CollectionField, CollectionVariable, ComponentVariable, BackgroundsDesign } from '@/types';
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty';
 import {
   DropdownMenu,
@@ -121,6 +125,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 
 interface RightSidebarProps {
   onLayerUpdate: (layerId: string, updates: Partial<Layer>) => void;
+  /**
+   * When true, the column chrome (width, border, background) is provided by a
+   * parent wrapper (RightPanel) and this component only renders its body.
+   */
+  embedded?: boolean;
 }
 
 /**
@@ -135,8 +144,30 @@ function pruneTextDescendants(children: Layer[] | undefined): Layer[] {
     .map(c => (c.children?.length ? { ...c, children: pruneTextDescendants(c.children) } : c));
 }
 
+/** The non-empty gradient/image CSS var maps from a backgrounds design object. */
+type BgVars = Pick<BackgroundsDesign, 'bgGradientVars' | 'bgImageVars'>;
+
+/**
+ * Extract the background gradient/image CSS var maps from a backgrounds design.
+ *
+ * These live in `design.backgrounds.bgGradientVars` / `bgImageVars` and hold the
+ * actual gradient/image values keyed by breakpoint+state. They are NOT encoded
+ * in Tailwind classes (the class only references `var(--bg-img)`), so any code
+ * that regenerates design from classes via `buildDesign` would drop them. The
+ * layer-style system round-trips through classes, so these vars must be carried
+ * through explicitly. Returns undefined when neither map has entries.
+ */
+function extractBgVars(bg: BackgroundsDesign | undefined): BgVars | undefined {
+  if (!bg) return undefined;
+  const out: BgVars = {};
+  if (bg.bgGradientVars && Object.keys(bg.bgGradientVars).length > 0) out.bgGradientVars = bg.bgGradientVars;
+  if (bg.bgImageVars && Object.keys(bg.bgImageVars).length > 0) out.bgImageVars = bg.bgImageVars;
+  return out.bgGradientVars || out.bgImageVars ? out : undefined;
+}
+
 const RightSidebar = React.memo(function RightSidebar({
   onLayerUpdate,
+  embedded = false,
 }: RightSidebarProps) {
   const selectedLayerId = useEditorStore((state) => state.selectedLayerId);
 
@@ -201,7 +232,6 @@ const RightSidebar = React.memo(function RightSidebar({
 
   const [currentClassInput, setCurrentClassInput] = useState<string>('');
   const classInputRef = useRef<HTMLInputElement>(null);
-  const [customId, setCustomId] = useState<string>('');
   const [containerTag, setContainerTag] = useState<string>('div');
   const [textTag, setTextTag] = useState<string>('p');
   const [showAddAttributePopover, setShowAddAttributePopover] = useState(false);
@@ -353,6 +383,14 @@ const RightSidebar = React.memo(function RightSidebar({
     if (!selectedLayerId) return false;
     const result = indexedFindLayerWithParent(layerIndexes, selectedLayerId);
     return result?.parent === null;
+  }, [selectedLayerId, layerIndexes]);
+
+  // Parent of the selected layer - drives the align-self control (its axis and
+  // visibility depend on the parent's flex/grid layout, not the layer's own)
+  const selectedLayerParent: Layer | null = useMemo(() => {
+    if (!selectedLayerId) return null;
+    const result = indexedFindLayerWithParent(layerIndexes, selectedLayerId);
+    return result?.parent ?? null;
   }, [selectedLayerId, layerIndexes]);
 
   // Check if selected collection is nested inside another collection
@@ -547,9 +585,9 @@ const RightSidebar = React.memo(function RightSidebar({
       case 'layout':
         // In text style mode, hide layout controls
         if (showTextStyleControls) return false;
-        // Layout controls: show for containers, hide for text-only and image elements
-        if (isImageLayer(layer)) return false;
-        return !isTextLayer(layer) || isButtonLayer(layer);
+        // Layout controls: every element gets a Type row; LayoutControls
+        // narrows the options for leaf elements (no flex/grid, inline block)
+        return true;
 
       case 'spacing':
         // Spacing controls (padding/margin): show for all elements
@@ -585,6 +623,10 @@ const RightSidebar = React.memo(function RightSidebar({
       case 'effects':
         // Effect controls (opacity, shadow): show for all elements
         // Opacity is useful in text edit mode for transparency
+        return true;
+
+      case 'cursor':
+        if (showTextStyleControls) return false;
         return true;
 
       case 'position':
@@ -779,13 +821,21 @@ const RightSidebar = React.memo(function RightSidebar({
     if (!activeLayerStyleId) return selectedLayer;
     const cls = activeChipClassTokens.join(' ');
     const { styleId: _s, styleIds: _ss, styleOverrides: _so, styleOverridesByStyle: _sm, ...rest } = selectedLayer;
-    return { ...rest, classes: cls, design: buildDesign(cls) };
+    const design = buildDesign(cls);
+    // Background gradient/image vars can't be reconstructed from classes, so carry
+    // the layer's own vars onto the proxy — otherwise the panel wouldn't show an
+    // applied gradient and the background handlers would misread the current state.
+    const bgVars = extractBgVars(selectedLayer.design?.backgrounds);
+    if (bgVars && design) {
+      design.backgrounds = { ...design.backgrounds, ...bgVars };
+    }
+    return { ...rest, classes: cls, design };
   }, [selectedLayer, activeLayerStyleId, activeChipClassTokens]);
 
   // Store an edited class string as the active chip's override (or clear it when
   // it matches the shared style again), then re-flatten the whole stack so the
   // canvas renders the resolved cascade. Only THIS layer changes.
-  const applyChipClasses = useCallback((chipId: string, newClassesStr: string) => {
+  const applyChipClasses = useCallback((chipId: string, newClassesStr: string, bgVars?: BgVars) => {
     if (!selectedLayer) return;
     const map: NonNullable<Layer['styleOverridesByStyle']> = { ...(selectedLayer.styleOverridesByStyle ?? {}) };
     const styleTokens = (stylesById.get(chipId)?.classes ?? '').split(' ').filter(Boolean).sort().join(' ');
@@ -803,11 +853,20 @@ const RightSidebar = React.memo(function RightSidebar({
       styleOverridesByStyle: hasMap ? map : undefined,
     };
     const resolved = resolveLayerClasses(probe, stylesById);
+    const design = buildDesign(resolved);
+    // Reapply the background gradient/image vars, which `buildDesign` can't recover
+    // from classes. When the caller supplies `bgVars` (a background edit) it is
+    // authoritative — including removals; otherwise preserve the layer's existing
+    // vars so unrelated edits don't wipe an applied gradient/image.
+    const effectiveBgVars = bgVars !== undefined ? bgVars : extractBgVars(selectedLayer.design?.backgrounds);
+    if (design && effectiveBgVars && (effectiveBgVars.bgGradientVars || effectiveBgVars.bgImageVars)) {
+      design.backgrounds = { ...design.backgrounds, ...effectiveBgVars };
+    }
     handleLayerUpdate(selectedLayer.id, {
       styleOverridesByStyle: hasMap ? map : undefined,
       styleOverrides: undefined,
       classes: resolved,
-      design: buildDesign(resolved),
+      design,
     });
   }, [selectedLayer, appliedStyleIds, stylesById, handleLayerUpdate]);
 
@@ -820,10 +879,15 @@ const RightSidebar = React.memo(function RightSidebar({
       handleLayerUpdate(layerId, updates);
       return;
     }
-    const { classes, design: _design, styleOverrides: _so, ...rest } = updates;
+    const { classes, design, styleOverrides: _so, ...rest } = updates;
     if (Object.keys(rest).length > 0) handleLayerUpdate(layerId, rest);
     const str = Array.isArray(classes) ? classes.join(' ') : classes;
-    applyChipClasses(chip, str);
+    // Route background gradient/image vars from the derived design through to the
+    // chip write — they aren't in `classes`, so dropping the design here would
+    // silently discard an applied gradient/image. When design is present it is
+    // authoritative (an empty result removes the vars).
+    const bgVars = design !== undefined ? (extractBgVars(design.backgrounds) ?? {}) : undefined;
+    applyChipClasses(chip, str, bgVars);
   }, [handleLayerUpdate, applyChipClasses]);
 
   // Classes section sources. With a style stack, the panel is chip-scoped: it
@@ -842,9 +906,18 @@ const RightSidebar = React.memo(function RightSidebar({
 
   // Update local state when selected layer changes (for settings fields)
   const [prevSelectedLayerId, setPrevSelectedLayerId] = useState<string | null>(null);
+  // Track element name + tag so the tag selectors resync when the layer's type
+  // changes in place (e.g. converting a heading to text via the context menu),
+  // where the selection id stays the same.
+  const layerTagSignature = `${selectedLayer?.name ?? ''}:${selectedLayer?.settings?.tag ?? ''}`;
+  const [prevLayerTagSignature, setPrevLayerTagSignature] = useState<string>('');
   if (selectedLayerId !== prevSelectedLayerId) {
     setPrevSelectedLayerId(selectedLayerId);
-    setCustomId(sanitizeHtmlId(selectedLayer?.settings?.id || selectedLayer?.attributes?.id || ''));
+    setPrevLayerTagSignature(layerTagSignature);
+    setContainerTag(selectedLayer?.settings?.tag || getDefaultContainerTag(selectedLayer));
+    setTextTag(selectedLayer?.settings?.tag || getDefaultTextTag(selectedLayer));
+  } else if (layerTagSignature !== prevLayerTagSignature) {
+    setPrevLayerTagSignature(layerTagSignature);
     setContainerTag(selectedLayer?.settings?.tag || getDefaultContainerTag(selectedLayer));
     setTextTag(selectedLayer?.settings?.tag || getDefaultTextTag(selectedLayer));
   }
@@ -960,18 +1033,6 @@ const RightSidebar = React.memo(function RightSidebar({
     }
   }, [addClass, currentClassInput]);
 
-  // Handle custom ID change - store in settings.id (takes priority over attributes.id in renderer)
-  const handleIdChange = (value: string) => {
-    const sanitizedId = sanitizeHtmlId(value);
-    setCustomId(sanitizedId);
-    if (selectedLayerId) {
-      const currentSettings = selectedLayer?.settings || {};
-      handleLayerUpdate(selectedLayerId, {
-        settings: { ...currentSettings, id: sanitizedId }
-      });
-    }
-  };
-
   // Handle container tag change
   const handleContainerTagChange = (tag: string) => {
     setContainerTag(tag);
@@ -988,9 +1049,16 @@ const RightSidebar = React.memo(function RightSidebar({
     setTextTag(tag);
     if (selectedLayerId) {
       const currentSettings = selectedLayer?.settings || {};
-      handleLayerUpdate(selectedLayerId, {
-        settings: { ...currentSettings, tag }
-      });
+      // Normalize the element name to match the tag family so legacy headings
+      // (stored as text with an h1-h6 tag) migrate to a proper heading.
+      const name = headingTagOptions.some(opt => opt.value === tag) ? 'heading' : 'text';
+      const updates: Partial<Layer> = { name, settings: { ...currentSettings, tag } };
+      // Drop an auto-assigned "Text"/"Heading" label so the layer shows its
+      // content again (a user's custom layer name is left untouched).
+      if (selectedLayer?.customName === 'Text' || selectedLayer?.customName === 'Heading') {
+        updates.customName = undefined;
+      }
+      handleLayerUpdate(selectedLayerId, updates);
     }
   };
 
@@ -1878,7 +1946,14 @@ const RightSidebar = React.memo(function RightSidebar({
 
   if (!selectedLayerId || !selectedLayer) {
     return (
-      <div className="w-64 shrink-0 bg-background border-l flex items-center justify-center h-screen">
+      <div
+        className={cn(
+          'flex items-center justify-center',
+          embedded
+            ? 'flex-1 min-h-0'
+            : 'w-64 shrink-0 bg-background border-l h-screen',
+        )}
+      >
         <span className="text-xs text-muted-foreground">Select layer</span>
       </div>
     );
@@ -1901,12 +1976,20 @@ const RightSidebar = React.memo(function RightSidebar({
         fields={fields}
         collections={collections}
         isInsideCollectionLayer={!!parentCollectionLayer}
+        embedded={embedded}
       />
     );
   }
 
   return (
-    <div className="w-64 shrink-0 bg-background border-l flex flex-col p-4 pb-0 h-full overflow-hidden">
+    <div
+      className={cn(
+        'flex flex-col p-4 pb-0 overflow-hidden',
+        embedded
+          ? 'flex-1 min-h-0'
+          : 'w-64 shrink-0 bg-background border-l h-full',
+      )}
+    >
       {/* Tabs.
           When the user is translating (non-default locale active) we keep the
           tab list visible but disable Design + Interactions and force the
@@ -1953,7 +2036,19 @@ const RightSidebar = React.memo(function RightSidebar({
           <div className="overflow-y-auto no-scrollbar overflow-x-hidden divide-y ">
 
           {shouldShowControl('layout', selectedLayer) && !showTextStyleControls && (
-            <LayoutControls layer={controlLayer} onLayerUpdate={controlUpdate} />
+            <LayoutControls
+              layer={controlLayer}
+              onLayerUpdate={controlUpdate}
+            />
+          )}
+
+          {/* How this layer behaves inside a flex parent (renders nothing otherwise) */}
+          {!showTextStyleControls && (
+            <FlexChildControls
+              layer={controlLayer}
+              parentLayer={selectedLayerParent}
+              onLayerUpdate={controlUpdate}
+            />
           )}
 
           {shouldShowControl('spacing', selectedLayer) && (
@@ -1965,7 +2060,15 @@ const RightSidebar = React.memo(function RightSidebar({
           )}
 
           {shouldShowControl('sizing', selectedLayer) && !showTextStyleControls && (
-            <SizingControls layer={controlLayer} onLayerUpdate={controlUpdate} />
+            <SizingControls
+              layer={controlLayer}
+              parentLayer={selectedLayerParent}
+              onLayerUpdate={controlUpdate}
+            />
+          )}
+
+          {shouldShowControl('position', selectedLayer) && !showTextStyleControls && (
+            <PositionControls layer={controlLayer} onLayerUpdate={controlUpdate} />
           )}
 
           {shouldShowControl('typography', selectedLayer) && (
@@ -2009,8 +2112,11 @@ const RightSidebar = React.memo(function RightSidebar({
             />
           )}
 
-          {shouldShowControl('position', selectedLayer) && !showTextStyleControls && (
-            <PositionControls layer={controlLayer} onLayerUpdate={controlUpdate} />
+          {shouldShowControl('cursor', selectedLayer) && (
+            <CursorControls
+              layer={controlLayer}
+              onLayerUpdate={controlUpdate}
+            />
           )}
 
           {shouldShowControl('transforms', selectedLayer) && (
@@ -2208,6 +2314,10 @@ const RightSidebar = React.memo(function RightSidebar({
                             onExpand={isRichTextElementContent && selectedLayerId
                               ? () => openRichTextSheet(selectedLayerId)
                               : undefined}
+                            fieldGroups={fieldGroups}
+                            allFields={fields}
+                            collections={collections}
+                            layer={selectedLayer}
                           />
                         );
                       })}
@@ -2220,18 +2330,14 @@ const RightSidebar = React.memo(function RightSidebar({
             {!isLocalizing && selectedLayerId !== 'body' && (<>
             {/* Attributes */}
             <div className="flex flex-col gap-2 pb-5 pt-5">
-              <div className="grid grid-cols-3">
-                <Label variant="muted">ID</Label>
-                <div className="col-span-2 *:w-full">
-                  <Input
-                    type="text"
-                    value={customId}
-                    onChange={(e) => handleIdChange(e.target.value)}
-                    placeholder="For in-page linking"
-                    disabled={isLockedByOther}
-                  />
-                </div>
-              </div>
+              {selectedLayer && (
+                <IdSetting
+                  layer={selectedLayer}
+                  onLayerUpdate={handleLayerUpdate}
+                  disabled={isLockedByOther}
+                  onOpenVariablesDialog={openVariablesDialog}
+                />
+              )}
 
               {/* Container Tag Selector - Only for containers/sections/blocks, hide for alerts */}
               {isContainerLayer(selectedLayer) && !isHeadingLayer(selectedLayer) && !isAlertLayer(selectedLayer) && (
@@ -2266,7 +2372,11 @@ const RightSidebar = React.memo(function RightSidebar({
 
               {/* Tag Selector - For heading and text layers */}
               {(selectedLayer?.name === 'heading' || (selectedLayer?.name === 'text' && !isContainerLayer(selectedLayer))) && (() => {
-                const tagOptions = selectedLayer?.name === 'heading' ? headingTagOptions : textTagOptions;
+                // Use isHeadingLayer (not name === 'heading') so legacy headings
+                // stored as text with an h1-h6 tag still get heading tag options
+                // instead of p/span/label — otherwise changing the tag demotes
+                // them to a paragraph.
+                const tagOptions = isHeadingLayer(selectedLayer) ? headingTagOptions : textTagOptions;
                 return (
                   <div className="grid grid-cols-3">
                     <Label variant="muted">Tag</Label>
@@ -2297,6 +2407,15 @@ const RightSidebar = React.memo(function RightSidebar({
                   </div>
                 );
               })()}
+
+              {selectedLayer && (
+                <VisibilitySetting
+                  layer={selectedLayer}
+                  onLayerUpdate={handleLayerUpdate}
+                  disabled={isLockedByOther}
+                  onOpenVariablesDialog={openVariablesDialog}
+                />
+              )}
             </div>
 
             {/* Content Panel - show for text-editable layers */}
@@ -2693,6 +2812,10 @@ const RightSidebar = React.memo(function RightSidebar({
                   {/* Sort By - only show if a real collection source is selected */}
                   {hasBoundCollectionSource(getCollectionVariable(selectedLayer)) && (
                     <>
+                      {/* Sort by/order are hidden for multi-asset: order is the
+                          image order in the field and there are no fields to sort by. */}
+                      {getCollectionVariable(selectedLayer)?.source_field_type !== 'multi_asset' && (
+                      <>
                       <div className="grid grid-cols-3">
                         <Label variant="muted">Sort by</Label>
                         <div className="col-span-2 *:w-full flex">
@@ -2799,6 +2922,8 @@ const RightSidebar = React.memo(function RightSidebar({
                               )}
                             </div>
                           </div>
+                      )}
+                      </>
                       )}
 
                       {/* Total Limit */}
@@ -3078,6 +3203,15 @@ const RightSidebar = React.memo(function RightSidebar({
                 </div>
               )}
             </SettingsPanel>
+            )}
+
+            {/* Advanced — hide while translating and for body */}
+            {!isLocalizing && selectedLayer && selectedLayerId !== 'body' && (
+              <AdvancedSettings
+                layer={selectedLayer}
+                onLayerUpdate={handleLayerUpdate}
+                disabled={isLockedByOther}
+              />
             )}
           </div>
         </TabsContent>

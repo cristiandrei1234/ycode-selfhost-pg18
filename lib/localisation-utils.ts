@@ -1,4 +1,4 @@
-import type { Layer, Page, Translation, Locale, LocaleOption, CollectionField, Component, ComponentVariable, DynamicTextVariable, DynamicRichTextVariable } from '@/types';
+import type { Layer, Page, Translation, Locale, LocaleOption, CollectionField, Component, ComponentVariable, DynamicTextVariable, DynamicRichTextVariable, StringAssetId, FieldVariable } from '@/types';
 import { getLayerIcon, getLayerName } from '@/lib/layer-display-utils';
 import {
   buildLayerTranslationKey,
@@ -259,6 +259,42 @@ export function getLocaleByCode(code: string): LocaleOption | undefined {
  */
 export function isLocaleCodeSupported(code: string): boolean {
   return LOCALES_CODES.has(code);
+}
+
+/**
+ * Strip characters that aren't valid in a region subtag and lowercase the rest.
+ * Keeps only letters and digits (e.g. "BE" -> "be", "419" stays "419").
+ */
+export function sanitizeRegionCode(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Combine a base language code and optional region subtag into a full locale code.
+ * e.g. ("nl", "be") -> "nl-be", ("nl", "") -> "nl".
+ */
+export function buildLocaleCode(language: string, region: string): string {
+  return region ? `${language}-${region}` : language;
+}
+
+/**
+ * Split a locale code into its language and region parts at the first hyphen.
+ * e.g. "fr-ca" -> { language: "fr", region: "ca" }, "nl" -> { language: "nl", region: "" }.
+ */
+export function parseLocaleCode(code: string): { language: string; region: string } {
+  const dashIndex = code.indexOf('-');
+  if (dashIndex === -1) {
+    return { language: code, region: '' };
+  }
+  return { language: code.slice(0, dashIndex), region: code.slice(dashIndex + 1) };
+}
+
+/**
+ * Validate a BCP-47-style locale code: a 2-3 letter language, optionally
+ * followed by hyphen-separated region/script subtags (e.g. "nl", "nl-be", "zh-hans-cn").
+ */
+export function isValidLocaleCode(code: string): boolean {
+  return /^[a-z]{2,3}(-[a-z0-9]{2,4})*$/.test(code);
 }
 
 /**
@@ -615,7 +651,7 @@ function classifySeoValue(value: string): { contentType: 'text' | 'richtext'; op
 
 function extractSeoItems(
   pageId: string,
-  seo: { title?: string; description?: string } | undefined,
+  seo: { title?: string; description?: string; image?: StringAssetId | FieldVariable | null } | undefined,
   items: TranslatableItem[]
 ): void {
   if (!seo) return;
@@ -650,6 +686,22 @@ function extractSeoItems(
       info: {
         icon: 'search',
         label: 'SEO Description',
+      },
+    });
+  }
+
+  // Only a fixed asset (not a CMS field variable) is translatable per locale.
+  if (typeof seo.image === 'string' && seo.image.trim()) {
+    items.push({
+      key: `page:${pageId}:seo:image`,
+      source_type: 'page',
+      source_id: pageId,
+      content_key: 'seo:image',
+      content_type: 'asset_id',
+      content_value: seo.image,
+      info: {
+        icon: 'image',
+        label: 'Social preview',
       },
     });
   }
@@ -892,6 +944,14 @@ export function injectTranslatedText(
     const textTranslation = getTranslationByKey(translations, textTranslationKey);
 
     const textValue = getTranslationValue(textTranslation, valueOptions);
+    // A layer-level text translation whose value is a rich-text doc still
+    // containing an unresolved `dynamicVariable` node is a binding artefact
+    // (the translation UI re-captured the field binding, not real translated
+    // text). Injecting it raw overwrites the already collection-resolved text
+    // with an unresolvable node, rendering empty. The actual localization for
+    // such bindings comes from the CMS field translation applied during
+    // collection resolution, so skip the layer translation in this case.
+    const textReintroducesDynamicVariable = richTextHasDynamicVariable(textValue);
     // Only inject when the layer actually has a text variable to translate.
     // Stale/orphan translation rows (e.g. legacy migration artefacts that
     // point at an ancestor div/section without `variables.text`) would
@@ -909,6 +969,7 @@ export function injectTranslatedText(
     const hasComponentVariableBinding = !!(layer.variables?.text as any)?.id;
     if (
       textValue
+      && !textReintroducesDynamicVariable
       && layer.variables?.text
       && !(layer as any)._textFromOverride
       && !hasComponentVariableBinding
@@ -938,6 +999,7 @@ export function injectTranslatedText(
       }
     } else if (
       textValue
+      && !textReintroducesDynamicVariable
       && hasComponentVariableBinding
       && !(layer as any)._textFromOverride
     ) {
@@ -1173,6 +1235,16 @@ export function looksLikeTiptapJson(value: string | null | undefined): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether a serialized rich-text value still contains an unresolved
+ * `dynamicVariable` node (a field/collection binding). Such values must not be
+ * injected as layer text — the binding renders empty outside the collection
+ * resolution pipeline.
+ */
+export function richTextHasDynamicVariable(value: string | null | undefined): boolean {
+  return typeof value === 'string' && value.includes('"dynamicVariable"');
 }
 
 /**

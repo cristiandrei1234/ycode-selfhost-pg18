@@ -7,7 +7,7 @@
  * Walks up the tree to find the root slider layer and reads/writes settings there.
  */
 
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
 
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
@@ -24,12 +24,14 @@ import {
 import SettingsPanel from './SettingsPanel';
 import ToggleGroup from './ToggleGroup';
 
-import { findAncestorByName, getCollectionVariable } from '@/lib/layer-utils';
+import { addChildToLayerTree, findAncestorByName, getCollectionVariable } from '@/lib/layer-utils';
 import { isSliderLayerName, DEFAULT_SLIDER_SETTINGS, createSlideLayer } from '@/lib/templates/utilities';
-import { EFFECTS_WITH_PER_VIEW } from '@/lib/slider-utils';
+import { EFFECTS_WITH_PER_VIEW, resolveResponsiveNumber, writeResponsiveNumber } from '@/lib/slider-utils';
+import { BREAKPOINTS } from '@/lib/breakpoint-utils';
 import { slidePrev, slideNext } from '@/hooks/use-canvas-slider';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { usePagesStore } from '@/stores/usePagesStore';
+import { useComponentsStore } from '@/stores/useComponentsStore';
 import { useCollectionLayerStore } from '@/stores/useCollectionLayerStore';
 import {
   MULTI_ASSET_COLLECTION_ID,
@@ -96,9 +98,13 @@ export default function SliderSettings({ layer, onLayerUpdate, allLayers, fieldG
   const handleNext = useCallback(() => slideNext(sliderLayerId), [sliderLayerId]);
 
   const currentPageId = useEditorStore((state) => state.currentPageId);
+  const editingComponentId = useEditorStore((state) => state.editingComponentId);
+  const editingComponentVariantId = useEditorStore((state) => state.editingComponentVariantId);
   const setSliderSnapCount = useEditorStore((state) => state.setSliderSnapCount);
   const addLayerWithId = usePagesStore((state) => state.addLayerWithId);
+  const updateComponentDraft = useComponentsStore((state) => state.updateComponentDraft);
   const setSelectedLayerId = useEditorStore((state) => state.setSelectedLayerId);
+  const activeBreakpoint = useEditorStore((state) => state.activeBreakpoint);
   const clearLayerData = useCollectionLayerStore((state) => state.clearLayerData);
 
   // Inner slides wrapper and the first slide inside it (the loop template when CMS-bound)
@@ -107,6 +113,21 @@ export default function SliderSettings({ layer, onLayerUpdate, allLayers, fieldG
   const templateSlideCollection = templateSlide ? getCollectionVariable(templateSlide) : null;
   const isMultiAssetSource = templateSlideCollection?.source_field_type === 'multi_asset';
   const isCmsSource = !!templateSlideCollection;
+
+  // Slider settings, resolved for the active breakpoint. Per view / per group are
+  // responsive, so their inputs reflect (and write to) the breakpoint currently
+  // selected in the builder's viewport switcher.
+  const settings: SliderSettingsType = { ...DEFAULT_SLIDER_SETTINGS, ...sliderLayer?.settings?.slider };
+  const perViewValue = resolveResponsiveNumber(settings.groupSlide, activeBreakpoint, 1);
+  const perGroupValue = Math.min(resolveResponsiveNumber(settings.slidesPerGroup, activeBreakpoint, 1), perViewValue);
+  const breakpointLabel = BREAKPOINTS.find(bp => bp.value === activeBreakpoint)?.label ?? '';
+
+  // Local draft state lets users freely type/clear the number inputs without the
+  // controlled value snapping back; valid values commit on change, blur clamps.
+  const [perViewInput, setPerViewInput] = useState(String(perViewValue));
+  const [perGroupInput, setPerGroupInput] = useState(String(perGroupValue));
+  useEffect(() => { setPerViewInput(String(perViewValue)); }, [perViewValue]);
+  useEffect(() => { setPerGroupInput(String(perGroupValue)); }, [perGroupValue]);
 
   // The multi-image field option is only enabled if at least one such field
   // is reachable from this slider's context (page or ancestor collections).
@@ -118,15 +139,28 @@ export default function SliderSettings({ layer, onLayerUpdate, allLayers, fieldG
   }, [fieldGroups]);
 
   const handleAddSlide = useCallback(() => {
-    if (!currentPageId || !sliderLayer) return;
-    if (!slidesLayer) return;
+    if (!sliderLayer || !slidesLayer) return;
     const slideNumber = (slidesLayer.children?.length ?? 0) + 1;
     const slide = createSlideLayer(`Slide ${slideNumber}`, '/ycode/layouts/assets/placeholder-2.webp');
-    if (slide) {
+    if (!slide) return;
+
+    // When editing a component, write to the component draft — not the page store,
+    // whose tree doesn't contain the slider being edited (would silently no-op).
+    if (editingComponentId) {
+      const drafts = useComponentsStore.getState().componentDrafts[editingComponentId];
+      if (!drafts) return;
+      const variantId = editingComponentVariantId && drafts[editingComponentVariantId]
+        ? editingComponentVariantId
+        : Object.keys(drafts)[0];
+      if (!variantId) return;
+      const newLayers = addChildToLayerTree(drafts[variantId], slidesLayer.id, slide);
+      updateComponentDraft(editingComponentId, variantId, newLayers);
+    } else {
+      if (!currentPageId) return;
       addLayerWithId(currentPageId, slidesLayer.id, slide);
-      requestAnimationFrame(() => setSelectedLayerId(slide.id));
     }
-  }, [currentPageId, sliderLayer, slidesLayer, addLayerWithId, setSelectedLayerId]);
+    requestAnimationFrame(() => setSelectedLayerId(slide.id));
+  }, [currentPageId, editingComponentId, editingComponentVariantId, sliderLayer, slidesLayer, addLayerWithId, updateComponentDraft, setSelectedLayerId]);
 
   /**
    * Switch slides content source between static, regular collection, and CMS multi-image.
@@ -252,11 +286,6 @@ export default function SliderSettings({ layer, onLayerUpdate, allLayers, fieldG
     ? 'static'
     : isMultiAssetSource ? 'multi_asset' : 'collection';
 
-  const settings: SliderSettingsType = {
-    ...DEFAULT_SLIDER_SETTINGS,
-    ...sliderLayer.settings?.slider,
-  };
-
   const updateSetting = (key: keyof SliderSettingsType, value: SliderSettingsType[keyof SliderSettingsType]) => {
     onLayerUpdate(sliderLayer.id, {
       settings: {
@@ -378,10 +407,10 @@ export default function SliderSettings({ layer, onLayerUpdate, allLayers, fieldG
           </div>
         </div>
 
-        {/* Slides per view - only for effects that support multiple slides */}
+        {/* Slides per view - responsive, only for effects that support multiple slides */}
         {EFFECTS_WITH_PER_VIEW.has(settings.animationEffect) && (
           <div className="grid grid-cols-3 items-center">
-            <Label variant="muted">Per view</Label>
+            <Label variant="muted" title={`Slides visible per view on ${breakpointLabel}`}>Per view</Label>
             <div className="col-span-2 *:w-full">
               <InputGroup>
                 <InputGroupInput
@@ -389,19 +418,32 @@ export default function SliderSettings({ layer, onLayerUpdate, allLayers, fieldG
                   step="1"
                   min="1"
                   max="10"
-                  value={String(settings.groupSlide)}
+                  value={perViewInput}
                   onChange={(e) => {
-                    const n = parseInt(e.target.value, 10);
+                    const raw = e.target.value.replace(/[^0-9]/g, '');
+                    setPerViewInput(raw);
+                    const n = parseInt(raw, 10);
                     if (!Number.isNaN(n) && n >= 1 && n <= 10) {
-                      const patch: Partial<typeof settings> = { groupSlide: n };
-                      if (settings.slidesPerGroup > n) patch.slidesPerGroup = n;
+                      const patch: Partial<SliderSettingsType> = {
+                        groupSlide: writeResponsiveNumber(settings.groupSlide, activeBreakpoint, n),
+                      };
+                      if (perGroupValue > n) {
+                        patch.slidesPerGroup = writeResponsiveNumber(settings.slidesPerGroup, activeBreakpoint, n);
+                      }
                       updateSettings(patch);
                     }
                   }}
                   onBlur={() => {
-                    const n = settings.groupSlide;
-                    if (n < 1) updateSettings({ groupSlide: 1, slidesPerGroup: 1 });
-                    else if (n > 10) updateSettings({ groupSlide: 10, slidesPerGroup: Math.min(settings.slidesPerGroup, 10) });
+                    const parsed = parseInt(perViewInput, 10);
+                    const clamped = Number.isNaN(parsed) ? 1 : Math.min(Math.max(parsed, 1), 10);
+                    setPerViewInput(String(clamped));
+                    const patch: Partial<SliderSettingsType> = {
+                      groupSlide: writeResponsiveNumber(settings.groupSlide, activeBreakpoint, clamped),
+                    };
+                    if (perGroupValue > clamped) {
+                      patch.slidesPerGroup = writeResponsiveNumber(settings.slidesPerGroup, activeBreakpoint, clamped);
+                    }
+                    updateSettings(patch);
                   }}
                 />
                 <InputGroupAddon align="inline-end" className="text-xs text-muted-foreground">
@@ -412,28 +454,31 @@ export default function SliderSettings({ layer, onLayerUpdate, allLayers, fieldG
           </div>
         )}
 
-        {/* Slides per group - only when slidesPerView > 1 */}
-        {EFFECTS_WITH_PER_VIEW.has(settings.animationEffect) && settings.groupSlide > 1 && (
+        {/* Slides per group - responsive, only when slidesPerView > 1 */}
+        {EFFECTS_WITH_PER_VIEW.has(settings.animationEffect) && perViewValue > 1 && (
           <div className="grid grid-cols-3 items-center">
-            <Label variant="muted">Per group</Label>
+            <Label variant="muted" title={`Slides advanced per step on ${breakpointLabel}`}>Per group</Label>
             <div className="col-span-2 *:w-full">
               <InputGroup>
                 <InputGroupInput
                   stepper
                   step="1"
                   min="1"
-                  max={settings.groupSlide}
-                  value={String(settings.slidesPerGroup)}
+                  max={perViewValue}
+                  value={perGroupInput}
                   onChange={(e) => {
-                    const n = parseInt(e.target.value, 10);
-                    if (!Number.isNaN(n) && n >= 1 && n <= settings.groupSlide) {
-                      updateSetting('slidesPerGroup', n);
+                    const raw = e.target.value.replace(/[^0-9]/g, '');
+                    setPerGroupInput(raw);
+                    const n = parseInt(raw, 10);
+                    if (!Number.isNaN(n) && n >= 1 && n <= perViewValue) {
+                      updateSetting('slidesPerGroup', writeResponsiveNumber(settings.slidesPerGroup, activeBreakpoint, n));
                     }
                   }}
                   onBlur={() => {
-                    const n = settings.slidesPerGroup;
-                    if (n < 1) updateSetting('slidesPerGroup', 1);
-                    else if (n > settings.groupSlide) updateSetting('slidesPerGroup', settings.groupSlide);
+                    const parsed = parseInt(perGroupInput, 10);
+                    const clamped = Number.isNaN(parsed) ? 1 : Math.min(Math.max(parsed, 1), perViewValue);
+                    setPerGroupInput(String(clamped));
+                    updateSetting('slidesPerGroup', writeResponsiveNumber(settings.slidesPerGroup, activeBreakpoint, clamped));
                   }}
                 />
                 <InputGroupAddon align="inline-end" className="text-xs text-muted-foreground">
@@ -654,7 +699,7 @@ export default function SliderSettings({ layer, onLayerUpdate, allLayers, fieldG
                 </Label>
               </div>
             )}
-            {EFFECTS_WITH_PER_VIEW.has(settings.animationEffect) && settings.groupSlide > 1 && (
+            {EFFECTS_WITH_PER_VIEW.has(settings.animationEffect) && perViewValue > 1 && (
               <div className="flex items-center gap-2">
                 <Checkbox
                   id="slider-centered"

@@ -17,6 +17,12 @@ export interface LayoutDesign {
   flexWrap?: string;
   justifyContent?: string;
   alignItems?: string;
+  alignSelf?: string;
+  // Flex child (how this layer behaves inside a flex parent)
+  flex?: string; // '1' | 'auto' | 'initial' | 'none'
+  flexGrow?: string; // '1' | '0'
+  flexShrink?: string; // '1' | '0'
+  order?: string; // 'first' | 'last' | 'none' | '1'..'12'
   gap?: string;
   columnGap?: string;
   rowGap?: string;
@@ -34,6 +40,8 @@ export interface TypographyDesign {
   lineHeight?: string;
   letterSpacing?: string;
   textAlign?: string;
+  textWrap?: string;
+  fontVariantNumeric?: string;
   textTransform?: string;
   textDecoration?: string;
   lineClamp?: string;
@@ -43,6 +51,7 @@ export interface TypographyDesign {
   verticalAlign?: string;
   color?: string;
   placeholderColor?: string;
+  textShadow?: string;
 }
 
 export interface SpacingDesign {
@@ -125,6 +134,7 @@ export interface EffectsDesign {
   filter?: string;
   backdropFilter?: string;
   mixBlendMode?: string;
+  cursor?: string;
 }
 
 export interface PositioningDesign {
@@ -216,10 +226,17 @@ export interface LightboxSettings {
   duration: string; // Transition duration in seconds
 }
 
+/**
+ * A value that can either be a single number (applies to every breakpoint) or
+ * an object of per-breakpoint overrides. Desktop is the base; tablet/mobile
+ * fall back to larger breakpoints when unset (desktop-first).
+ */
+export type ResponsiveNumber = number | Partial<Record<Breakpoint, number>>;
+
 export interface SliderSettings {
   navigation: boolean;
-  groupSlide: number;
-  slidesPerGroup: number;
+  groupSlide: ResponsiveNumber; // Slides visible per view (responsive)
+  slidesPerGroup: ResponsiveNumber; // Slides advanced per navigation step (responsive)
   loop: SliderLoopMode;
   centered: boolean;
   touchEvents: boolean;
@@ -240,7 +257,19 @@ export interface SliderSettings {
 export interface LayerSettings {
   id?: string; // Custom element ID
   tag?: string; // HTML tag override (e.g., 'h1', 'h2', etc.)
-  hidden?: boolean; // Element visibility in canvas
+  hidden?: boolean; // Hidden everywhere (canvas + published) — not rendered unless kept in HTML
+  // Inside a component: drive `hidden` from a 'visibility' component variable so
+  // each instance can show or hide this layer. Resolved during
+  // `applyComponentOverrides` (SSR) and live in the editor LayerRenderer; while
+  // linked, the stored `hidden` value is ignored.
+  visibilityVariableId?: string;
+  // Inside a component: drive the HTML `id` attribute from an 'id' component
+  // variable so each instance can carry its own element ID (e.g. per-page
+  // analytics/tracking IDs on a shared button). Resolved during
+  // `applyComponentOverrides` (SSR) and live in the editor LayerRenderer; while
+  // linked, the stored `id` value is ignored.
+  idVariableId?: string;
+  keepInHtml?: boolean; // When hidden, render collapsed (display: none) instead of omitting, so custom code / interactions can reveal it
   customAttributes?: Record<string, string>; // Custom HTML attributes { attributeName: attributeValue }
   locale?: {
     format?: 'locale' | 'code'; // Display format for `localeSelector` layers (locale => 'English', code => 'EN')
@@ -461,6 +490,8 @@ export interface Layer {
     video?: Record<string, ComponentVariableValue>; // ComponentVariable.id → override value (video)
     icon?: Record<string, ComponentVariableValue>; // ComponentVariable.id → override value (icon)
     variant?: Record<string, ComponentVariableValue>; // ComponentVariable.id → override value (variant)
+    visibility?: Record<string, ComponentVariableValue>; // ComponentVariable.id → override value (visibility)
+    id?: Record<string, ComponentVariableValue>; // ComponentVariable.id → override value (element id)
     variableLinks?: Record<string, string>; // childVariableId → parentVariableId (pass-through from nested component to parent)
   };
 
@@ -516,6 +547,10 @@ export interface Layer {
     // Mirrors `CollectionPaginationMeta.maxTotal` so client-side filtering shows
     // the same clamped count/`hasMore` as SSR instead of the raw filtered total.
     maxTotal?: number;
+    // The collection's configured `offset` — leading records skipped before
+    // paginating. Forwarded to the filter API so client-side filtered paging
+    // composes offset with pagination the same way SSR does.
+    baseOffset?: number;
     paginationMode?: 'pages' | 'load_more';
     layerTemplate: Layer[];
     collectionLayerClasses?: string[];
@@ -680,7 +715,7 @@ export interface BlockTemplate {
 export interface ComponentVariable {
   id: string;        // Unique variable ID
   name: string;      // Display name (e.g., "Button title")
-  type?: 'text' | 'rich_text' | 'image' | 'link' | 'audio' | 'video' | 'icon' | 'variant'; // Variable type (defaults to 'text' for backwards compatibility)
+  type?: 'text' | 'rich_text' | 'image' | 'link' | 'audio' | 'video' | 'icon' | 'variant' | 'visibility' | 'id'; // Variable type (defaults to 'text' for backwards compatibility)
   placeholder?: string; // Placeholder text shown in text override inputs
   default_value?: ComponentVariableValue; // Default value
 }
@@ -1264,6 +1299,48 @@ export interface Setting {
   updated_at: string;
 }
 
+// Agent (AI builder) Settings
+export type AgentProviderId = 'anthropic' | 'openai' | 'google' | 'xai';
+
+/** Who a configured provider key is available to. */
+export type AgentKeyScope = 'all' | 'personal';
+
+export interface AgentProviderKeyStatus {
+  /** Whether this provider has an API key (from settings or environment). */
+  configured: boolean;
+  /** Where the active key comes from. */
+  source: 'setting' | 'env' | null;
+  /** Availability of the active key: 'personal' = only the current user,
+   * 'all' = everyone on the project (shared key or env var). */
+  scope: AgentKeyScope | null;
+  /** Masked hint of the configured key (e.g. "sk-ant-...wxyz"), never the full key. */
+  maskedKey: string | null;
+}
+
+export interface AgentSettingsStatus {
+  /** Whether at least one provider has an API key. */
+  configured: boolean;
+  /** Whether the agent is enabled in the builder (defaults to true). */
+  agentEnabled: boolean;
+  /** Per-provider key status. */
+  providers: Record<AgentProviderId, AgentProviderKeyStatus>;
+  /** Default model id. */
+  model: string;
+  /** Model ids the builder is allowed to use. */
+  enabledModels: string[];
+}
+
+export interface UpdateAgentSettingsData {
+  /** Per-provider keys; null removes the stored key; undefined keeps the current one. */
+  keys?: Partial<Record<AgentProviderId, string | null>>;
+  /** Per-provider key availability. With a new key: where to store it. Without
+   * a key: moves the existing stored key to the given scope. */
+  keyScopes?: Partial<Record<AgentProviderId, AgentKeyScope>>;
+  model?: string;
+  enabledModels?: string[];
+  agentEnabled?: boolean;
+}
+
 // Color Variables
 export interface ColorVariable {
   id: string;
@@ -1414,8 +1491,24 @@ export interface VariantSettingsValue {
   variant_id: string;
 }
 
-// Component variable value type (text, image, link, audio, video, icon, and variant variables)
-export type ComponentVariableValue = DynamicTextVariable | DynamicRichTextVariable | ImageSettingsValue | LinkSettingsValue | AudioSettingsValue | VideoSettingsValue | IconSettingsValue | VariantSettingsValue;
+// Visibility value for component variables. Stored on
+// `componentOverrides.visibility[<variableId>]` and as `default_value` on a
+// `'visibility'`-typed ComponentVariable. Layers linked through
+// `settings.visibilityVariableId` render only when `visible` is true.
+export interface VisibilitySettingsValue {
+  visible: boolean;
+}
+
+// Element id value for component variables. Stored on
+// `componentOverrides.id[<variableId>]` and as `default_value` on an
+// `'id'`-typed ComponentVariable. Layers linked through
+// `settings.idVariableId` render this as their HTML `id` attribute.
+export interface IdSettingsValue {
+  id: string;
+}
+
+// Component variable value type (text, image, link, audio, video, icon, variant, visibility, and id variables)
+export type ComponentVariableValue = DynamicTextVariable | DynamicRichTextVariable | ImageSettingsValue | LinkSettingsValue | AudioSettingsValue | VideoSettingsValue | IconSettingsValue | VariantSettingsValue | VisibilitySettingsValue | IdSettingsValue;
 
 // Pagination Layer Definition (partial Layer for styling pagination controls)
 export interface PaginationLayerConfig {
@@ -1477,6 +1570,10 @@ export interface CollectionPaginationMeta {
   // Treated as a max total: clamps `totalItems` and stops `load_more` once
   // reached, even if the underlying collection has more matching rows.
   maxTotal?: number;
+  // The collection's configured `offset` — number of leading records to skip
+  // BEFORE paginating. `totalItems` already excludes these, and the client
+  // (load_more) must forward it so continued paging stays past the offset.
+  baseOffset?: number;
 }
 
 // Conditional Visibility Types
@@ -1792,6 +1889,32 @@ export interface PublishTableStats {
   added: number;
   updated: number;
   deleted: number;
+}
+
+/**
+ * AI builder chat history, stored server-side so conversations are shared
+ * across the team and survive browser data clearing.
+ *
+ * `messages` is the stripped transcript (text, tool calls, parts, mentions —
+ * no image data or revert checkpoints). Its canonical shape is `ChatMessage`
+ * in `stores/useAiChatStore.ts`; the server persists it as opaque JSON and
+ * never inspects individual entries, hence `unknown[]`.
+ */
+export interface AiChatSummary {
+  id: string;
+  title: string;
+  updated_at: string;
+}
+
+export interface AiChat extends AiChatSummary {
+  messages: unknown[];
+  created_at: string;
+}
+
+export interface UpsertAiChatData {
+  id: string;
+  title: string;
+  messages: unknown[];
 }
 
 /** Aggregated publishing statistics returned by the publish API */

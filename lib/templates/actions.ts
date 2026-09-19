@@ -12,7 +12,8 @@ export const actionTemplates: Record<string, BlockTemplate> = {
     name: 'Button',
     template: {
       name: 'button',
-      classes: ['flex', 'flex-row', 'items-center', 'justify-center', 'text-[#FFFFFF]', 'pr-[16px]', 'pl-[16px]', 'h-[38px]', 'text-[14px]', 'rounded-[12px]', 'bg-[#171717]'],
+      // self-start keeps the button at its natural width inside flex-column parents (Flex child → Align → Start)
+      classes: ['flex', 'flex-row', 'items-center', 'justify-center', 'self-start', 'text-[#FFFFFF]', 'pr-[16px]', 'pl-[16px]', 'h-[38px]', 'text-[14px]', 'rounded-[12px]', 'bg-[#171717]'],
       children: [
         getTemplateRef('text', {
           settings: {

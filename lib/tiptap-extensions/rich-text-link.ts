@@ -325,23 +325,9 @@ export const RichTextLink = Mark.create<RichTextLinkOptions>({
   },
 });
 
-/**
- * Extract LinkSettings from mark attributes
- */
-export function getLinkSettingsFromMark(attrs: Record<string, any>): LinkSettings {
-  return {
-    type: attrs.type || 'url',
-    url: attrs.url || undefined,
-    email: attrs.email || undefined,
-    phone: attrs.phone || undefined,
-    asset: attrs.asset || undefined,
-    page: attrs.page || undefined,
-    field: attrs.field || undefined,
-    anchor_layer_id: attrs.anchor_layer_id || undefined,
-    target: attrs.target || undefined,
-    download: attrs.download || false,
-    rel: attrs.rel || undefined,
-  };
-}
+// Re-export the render-safe attrs mapper (no Tiptap dependency) so existing
+// builder imports keep working while public render paths import it directly
+// from `./link-settings` to avoid bundling `@tiptap/core`.
+export { getLinkSettingsFromMark } from './link-settings';
 
 export default RichTextLink;

@@ -76,4 +76,28 @@ export const SWIPER_DATA_ATTR_MAP: Record<string, string> = {
   slideButtonNext: 'data-slider-next',
   slideBullets: 'data-slider-pagination',
   slideFraction: 'data-slider-fraction',
+  slideBullet: 'data-slider-bullet',
 };
+
+/** Accessible names for slider chrome that renders as a native button. */
+export const SLIDER_BUTTON_ARIA_LABELS: Record<string, string> = {
+  slideButtonPrev: 'Previous slide',
+  slideButtonNext: 'Next slide',
+  slideBullet: 'Go to slide',
+};
+
+/** Prev / next wrappers and bullets — not form submit buttons. */
+export function isSliderChromeButton(name: string): boolean {
+  return name === 'slideButtonPrev' || name === 'slideButtonNext' || name === 'slideBullet';
+}
+
+/**
+ * Strip UA button chrome so slider controls keep their Tailwind look.
+ * Attribute selectors only — must not reset designer `button` layers.
+ * Prev/next are invisible hit areas (the circle is a child), so they
+ * need `background:transparent`. Bullets ARE the visible dots (`bg-white`)
+ * — a transparent reset would hide them (attribute+element beats a class).
+ */
+export const SLIDER_BUTTON_RESET_CSS =
+  'button[data-slider-prev],button[data-slider-next]{appearance:none;-webkit-appearance:none;background:transparent;border:0;padding:0;margin:0;font:inherit;color:inherit}'
+  + 'button[data-slider-bullet]{appearance:none;-webkit-appearance:none;border:0;padding:0;margin:0;font:inherit;color:inherit}';

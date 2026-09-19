@@ -8,14 +8,16 @@
  *                        404 on `/ycode/layouts/assets/*`.
  *   - Supabase assets : user-uploaded files rendered via the `/a/<hash>/<name>`
  *                        proxy URL pattern. We decode the hash back to an
- *                        asset UUID, look up the row, fetch `public_url`,
- *                        and ship the bytes at the same proxy path so the
- *                        rendered HTML doesn't need rewriting.
+ *                        asset UUID, look up the row, fetch `public_url`
+ *                        (or take inline SVG `content` for assets stored
+ *                        without a file), and ship the bytes at the same
+ *                        proxy path so the rendered HTML doesn't need rewriting.
  */
 
 import fs from 'fs/promises'
 import path from 'path'
 
+import { withSvgIntrinsicSize } from '@/lib/asset-utils'
 import { base62ToUuid } from '@/lib/convertion-utils'
 import { getSupabaseAdmin } from '@/lib/supabase-server'
 
@@ -39,7 +41,15 @@ interface SupabaseAssetClient {
         eq(col: string, val: unknown): {
           is(col: string, val: unknown): {
             maybeSingle(): Promise<{
-              data: { id: string; filename: string; mime_type: string; public_url: string | null } | null
+              data: {
+                id: string
+                filename: string
+                mime_type: string
+                public_url: string | null
+                content: string | null
+                width: number | null
+                height: number | null
+              } | null
               error: { message: string } | null
             }>
           }
@@ -96,15 +106,25 @@ async function fetchAssetByProxyUrl(
 
   const { data: asset, error } = await client
     .from('assets')
-    .select('id, filename, mime_type, public_url')
+    .select('id, filename, mime_type, public_url, content, width, height')
     .eq('id', assetId)
     .eq('is_published', true)
     .is('deleted_at', null)
     .maybeSingle()
 
-  if (error || !asset?.public_url) {
+  if (error || !asset || (!asset.public_url && !asset.content)) {
     console.warn(`[Static Export] Could not look up asset for ${proxyUrl}: ${error?.message ?? 'not found'}`)
     return null
+  }
+
+  // Inline SVGs have no file in storage — the markup itself is the asset.
+  // Inject width/height so a viewBox-only SVG keeps an intrinsic size in <img>.
+  if (!asset.public_url) {
+    return {
+      key: proxyUrl.replace(/^\/+/, ''),
+      body: withSvgIntrinsicSize(asset.content ?? '', asset.width, asset.height),
+      contentType: asset.mime_type || 'image/svg+xml',
+    }
   }
 
   try {

@@ -89,6 +89,20 @@ function bodyCell(text: string, borders?: CellBorders) {
   };
 }
 
+// Child block for Columns/Rows/Grid. Fill width so it stretches across its
+// column/cell instead of shrinking to content (flex-row children don't stretch by default).
+function fillBlock() {
+  return {
+    name: 'div',
+    classes: ['flex', 'flex-col', 'w-[100%]'],
+    children: [],
+    design: {
+      layout: { isActive: true, display: 'Flex', flexDirection: 'column' },
+      sizing: { isActive: true, width: '100%' },
+    },
+  };
+}
+
 export const structureTemplates: Record<string, BlockTemplate> = {
   div: {
     icon: 'block',
@@ -150,27 +164,11 @@ export const structureTemplates: Record<string, BlockTemplate> = {
     name: 'Columns',
     template: {
       name: 'div',
-      classes: ['flex', 'gap-[16px]'],
-      children: [
-        {
-          name: 'div',
-          classes: ['flex', 'flex-col'],
-          children: [],
-          design: {
-            layout: { isActive: true, display: 'Flex', flexDirection: 'column' },
-          }
-        },
-        {
-          name: 'div',
-          classes: ['flex', 'flex-col'],
-          children: [],
-          design: {
-            layout: { isActive: true, display: 'Flex', flexDirection: 'column' },
-          }
-        }
-      ] as any[],
+      classes: ['flex', 'gap-[16px]', 'w-[100%]'],
+      children: [fillBlock(), fillBlock()] as any[],
       design: {
-        layout: { isActive: true, display: 'Flex', gap: '16px' }
+        layout: { isActive: true, display: 'Flex', gap: '16px' },
+        sizing: { isActive: true, width: '100%' },
       }
     }
   },
@@ -180,27 +178,11 @@ export const structureTemplates: Record<string, BlockTemplate> = {
     name: 'Rows',
     template: {
       name: 'div',
-      classes: ['flex', 'flex-col', 'gap-[16px]'],
-      children: [
-        {
-          name: 'div',
-          classes: ['flex', 'flex-col'],
-          children: [],
-          design: {
-            layout: { isActive: true, display: 'Flex', flexDirection: 'column' },
-          }
-        },
-        {
-          name: 'div',
-          classes: ['flex', 'flex-col'],
-          children: [],
-          design: {
-            layout: { isActive: true, display: 'Flex', flexDirection: 'column' },
-          }
-        }
-      ] as any[],
+      classes: ['flex', 'flex-col', 'gap-[16px]', 'w-[100%]'],
+      children: [fillBlock(), fillBlock()] as any[],
       design: {
-        layout: { isActive: true, display: 'Flex', flexDirection: 'column', gap: '16px' }
+        layout: { isActive: true, display: 'Flex', flexDirection: 'column', gap: '16px' },
+        sizing: { isActive: true, width: '100%' },
       }
     }
   },
@@ -210,43 +192,11 @@ export const structureTemplates: Record<string, BlockTemplate> = {
     name: 'Grid',
     template: {
       name: 'div',
-      classes: ['grid', 'grid-cols-[repeat(2,_1fr)]', 'gap-[16px]'],
-      children: [
-        {
-          name: 'div',
-          classes: ['flex', 'flex-col'],
-          children: [],
-          design: {
-            layout: { isActive: true, display: 'Flex', flexDirection: 'column' },
-          }
-        },
-        {
-          name: 'div',
-          classes: ['flex', 'flex-col'],
-          children: [],
-          design: {
-            layout: { isActive: true, display: 'Flex', flexDirection: 'column' },
-          }
-        },
-        {
-          name: 'div',
-          classes: ['flex', 'flex-col'],
-          children: [],
-          design: {
-            layout: { isActive: true, display: 'Flex', flexDirection: 'column' },
-          }
-        },
-        {
-          name: 'div',
-          classes: ['flex', 'flex-col'],
-          children: [],
-          design: {
-            layout: { isActive: true, display: 'Flex', flexDirection: 'column' },
-          }
-        }
-      ] as any[],
+      classes: ['grid', 'grid-cols-[repeat(2,_1fr)]', 'gap-[16px]', 'w-[100%]'],
+      children: [fillBlock(), fillBlock(), fillBlock(), fillBlock()] as any[],
       design: {
-        layout: { isActive: true, display: 'Grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' }
+        layout: { isActive: true, display: 'Grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '16px' },
+        sizing: { isActive: true, width: '100%' },
       }
     }
   },
