@@ -2,18 +2,22 @@ import { notFound, redirect, permanentRedirect } from 'next/navigation';
 import { connection } from 'next/server';
 import { unstable_cache } from 'next/cache';
 import { addCacheTag } from '@vercel/functions';
+import Link from 'next/link';
 import type { Metadata } from 'next';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
+import { GLOBAL_SETTINGS_TAG } from '@/lib/cache-tags';
 import { buildSlugPath } from '@/lib/page-utils';
 import { generatePageMetadata, fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
-import { fetchPageByPath, fetchPageByPathForMetadata, fetchErrorPage, splitPageData, reassemblePageData, slimPageData } from '@/lib/page-fetcher';
+import { fetchHomepage, fetchPageByPath, fetchPageByPathForMetadata, fetchErrorPage, splitPageData, reassemblePageData, slimPageData } from '@/lib/page-fetcher';
+import type { PageData } from '@/lib/page-fetcher';
 import PageRenderer from '@/components/PageRenderer';
 import PasswordForm from '@/components/PasswordForm';
 import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { parseAuthCookie, getPasswordProtection, fetchFoldersForAuth } from '@/lib/page-auth';
 import { getSiteBaseUrl } from '@/lib/url-utils';
+import { getOffCanonicalDynamicRedirect } from '@/lib/hreflang-utils';
 import { matchRedirect } from '@/lib/redirect-utils';
-import type { Page, PageFolder, Translation, Redirect as RedirectType } from '@/types';
+import type { PageFolder, Translation, Redirect as RedirectType } from '@/types';
 
 // Static by default for performance, dynamic only when pagination is requested
 export const revalidate = false; // Cache indefinitely until publish invalidates
@@ -29,7 +33,7 @@ export async function generateStaticParams() {
     const supabase = await getSupabaseAdmin();
 
     if (!supabase) {
-      return [];
+      return [{ slug: [] }];
     }
 
     // Get all published pages and folders (excluding soft-deleted)
@@ -59,10 +63,12 @@ export async function generateStaticParams() {
       .is('deleted_at', null);
 
     if (!pages || !folders) {
-      return [];
+      return [{ slug: [] }];
     }
 
-    const params: { slug: string[] }[] = [];
+    const params: { slug: string[] }[] = [
+      { slug: [] }, // Default-locale homepage (`/` lives in this catch-all)
+    ];
 
     // Build translations map for easier lookup
     const translationsMap: Record<string, Record<string, Translation>> = {};
@@ -79,7 +85,7 @@ export async function generateStaticParams() {
     // Generate localized homepage paths (e.g., /fr/, /es/)
     if (locales) {
       for (const locale of locales) {
-        if (locale.is_default) continue; // Skip default locale (/ is handled by app/page.tsx)
+        if (locale.is_default) continue; // Skip default locale (`/` is `{ slug: [] }` above)
         params.push({ slug: [locale.code] });
       }
     }
@@ -95,7 +101,7 @@ export async function generateStaticParams() {
       const defaultPath = buildSlugPath(page, folders as PageFolder[], 'page');
       const defaultSegments = defaultPath.slice(1).split('/').filter(Boolean);
 
-      // Skip empty paths (homepage is handled by app/page.tsx)
+      // Skip empty paths (default-locale homepage is `{ slug: [] }` above)
       if (defaultSegments.length > 0) {
         params.push({ slug: defaultSegments });
       }
@@ -143,7 +149,7 @@ export async function generateStaticParams() {
     return params;
   } catch (error) {
     console.error('Failed to generate static params:', error);
-    return [];
+    return [{ slug: [] }];
   }
 }
 
@@ -188,6 +194,35 @@ async function fetchPublishedPageWithLayers(slugPath: string) {
   return reassemblePageData(core, layers || []);
 }
 
+async function fetchPublishedHomepage() {
+  const tags = ['route-/', 'all-pages'];
+  const opts = { tags, revalidate: false as const };
+
+  const [core, layers] = await Promise.all([
+    unstable_cache(
+      async () => {
+        const data = await fetchHomepage(true);
+        if (!data) return null;
+        return splitPageData(data as PageData).core;
+      },
+      ['core-/'],
+      opts
+    )(),
+    unstable_cache(
+      async () => {
+        const data = await fetchHomepage(true);
+        if (!data) return null;
+        return splitPageData(data as PageData).layers;
+      },
+      ['layers-/'],
+      opts
+    )(),
+  ]);
+
+  if (!core) return null;
+  return reassemblePageData(core, layers || []);
+}
+
 async function fetchPublishedPageForMetadata(slugPath: string) {
   return unstable_cache(
     async () => fetchPageByPathForMetadata(slugPath, true),
@@ -210,10 +245,13 @@ async function fetchCachedRedirects(): Promise<RedirectType[] | null> {
 
 async function fetchCachedGlobalSettings() {
   try {
+    // Also tagged on its own so a selective publish can refresh it —
+    // `published_at` changes on every publish, and re-rendered pages must
+    // see the new one even when no global resource changed.
     return await unstable_cache(
       async () => fetchGlobalPageSettings(),
       ['data-for-global-settings'],
-      { tags: ['all-pages'], revalidate: false }
+      { tags: ['all-pages', GLOBAL_SETTINGS_TAG], revalidate: false }
     )();
   } catch {
     return {
@@ -255,23 +293,20 @@ async function fetchCachedErrorPage(errorCode: 401 | 404) {
 }
 
 interface PageProps {
-  params: Promise<{ slug: string | string[] }>;
+  params: Promise<{ slug?: string[] }>;
 }
 
 export default async function Page({ params }: PageProps) {
-  // Await params
   const { slug } = await params;
-
-  // Handle catch-all slug (join array into path)
-  const slugPath = Array.isArray(slug) ? slug.join('/') : slug;
+  const slugPath = slug?.join('/') ?? '';
+  const isHomepage = slugPath === '';
 
   // Tag this response for Vercel CDN cache invalidation. The publish endpoint
   // purges this exact tag (route-/<slug>) so only this URL's cache entry is
   // invalidated. No-ops outside Vercel.
-  await addCacheTag([`route-/${slugPath}`, 'all-pages']);
+  await addCacheTag([isHomepage ? 'route-/' : `route-/${slugPath}`, 'all-pages']);
 
-  // Check for redirects before processing the page
-  const currentPath = `/${slugPath}`;
+  const currentPath = isHomepage ? '/' : `/${slugPath}`;
   const redirects = await fetchCachedRedirects();
   if (redirects && Array.isArray(redirects)) {
     const matched = matchRedirect(currentPath, redirects);
@@ -284,16 +319,33 @@ export default async function Page({ params }: PageProps) {
     }
   }
 
-  // Fetch page data and global settings in parallel
   const [data, globalSettings] = await Promise.all([
-    fetchPublishedPageWithLayers(slugPath),
+    isHomepage ? fetchPublishedHomepage() : fetchPublishedPageWithLayers(slugPath),
     fetchCachedGlobalSettings(),
   ]);
 
-  // Page not found: hand off to the 404 boundary so the response carries a real
-  // HTTP 404 status (the custom 404 page is rendered there). Returning content
-  // here would emit a 200 "soft 404", which search engines penalize.
-  if (!data) {
+  if (!data || (isHomepage && !data.pageLayers)) {
+    if (isHomepage) {
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-white">
+          <div className="text-center p-8 flex flex-col items-center justify-center gap-2">
+            <h1 className="text-xl font-semibold text-neutral-900">
+              Welcome to Ycode
+            </h1>
+            <Link
+              href="/ycode"
+              className=" bg-blue-500 text-white text-sm font-medium h-8 flex items-center justify-center px-3 rounded-lg transition-colors"
+            >
+              Get started
+            </Link>
+          </div>
+        </div>
+      );
+    }
+
+    // Page not found: hand off to the 404 boundary so the response carries a real
+    // HTTP 404 status (the custom 404 page is rendered there). Returning content
+    // here would emit a 200 "soft 404", which search engines penalize.
     notFound();
   }
 
@@ -305,6 +357,23 @@ export default async function Page({ params }: PageProps) {
   // Check password protection for this page.
   // First evaluate without cookies() so non-protected pages stay cacheable.
   const folders = await fetchCachedFoldersForAuth();
+
+  // Redirect off-canonical dynamic slugs (e.g. a default slug requested under a
+  // translated locale) to the canonical localized URL to avoid duplicate content.
+  if (page.is_dynamic && collectionItem) {
+    const canonicalPath = getOffCanonicalDynamicRedirect({
+      page,
+      folders,
+      locale,
+      translations,
+      itemId: collectionItem.id,
+      currentPath,
+    });
+    if (canonicalPath) {
+      permanentRedirect(canonicalPath);
+    }
+  }
+
   const protectionCheck = getPasswordProtection(page, folders, null);
 
   // If page is protected, opt into dynamic rendering and read the auth cookie.
@@ -382,19 +451,24 @@ export default async function Page({ params }: PageProps) {
 }
 
 // Generate metadata
-export async function generateMetadata({ params }: { params: Promise<{ slug: string | string[] }> }): Promise<Metadata> {
+export async function generateMetadata({ params }: { params: Promise<{ slug?: string[] }> }): Promise<Metadata> {
   const { slug } = await params;
+  const slugPath = slug?.join('/') ?? '';
+  const isHomepage = slugPath === '';
 
-  // Handle catch-all slug (join array into path)
-  const slugPath = Array.isArray(slug) ? slug.join('/') : slug;
-
-  // Fetch page and global settings in parallel
   const [data, globalSettings] = await Promise.all([
-    fetchPublishedPageForMetadata(slugPath),
+    isHomepage ? fetchPublishedHomepage() : fetchPublishedPageForMetadata(slugPath),
     fetchCachedGlobalSettings(),
   ]);
 
   if (!data) {
+    if (isHomepage) {
+      return {
+        title: 'Ycode',
+        description: 'Built with Ycode',
+      };
+    }
+
     return {
       title: 'Page Not Found',
       robots: { index: false, follow: false },
@@ -415,18 +489,22 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
     };
   }
 
+  const routeTag = isHomepage ? 'route-/' : `route-/${slugPath}`;
   const { meta, baseUrl } = await unstable_cache(
     async () => ({
       meta: await generatePageMetadata(data.page, {
-        fallbackTitle: slugPath.charAt(0).toUpperCase() + slugPath.slice(1),
+        fallbackTitle: isHomepage
+          ? 'Home'
+          : slugPath.charAt(0).toUpperCase() + slugPath.slice(1),
         collectionItem: data.collectionItem,
-        pagePath: '/' + slugPath,
+        pagePath: isHomepage ? '/' : `/${slugPath}`,
         globalSeoSettings: globalSettings,
+        translations: data.translations,
       }),
       baseUrl: getSiteBaseUrl({ globalCanonicalUrl: globalSettings.globalCanonicalUrl }),
     }),
-    [`data-for-route-/${slugPath}-meta`],
-    { tags: [`route-/${slugPath}`, 'all-pages'], revalidate: false }
+    [isHomepage ? 'data-for-route-/-meta' : `data-for-route-/${slugPath}-meta`],
+    { tags: [routeTag, 'all-pages'], revalidate: false }
   )();
 
   if (baseUrl) {

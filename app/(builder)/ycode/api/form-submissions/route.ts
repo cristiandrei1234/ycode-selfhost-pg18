@@ -10,6 +10,8 @@ import { dispatchFormSubmittedEvent } from '@/lib/services/webhookService';
 import { sendFormSubmissionEmail, extractReplyToEmail } from '@/lib/services/emailService';
 import { processAppIntegrations } from '@/lib/apps/integration-service';
 import { noCache } from '@/lib/api-response';
+import { screenFormSubmission, stripHoneypotField } from '@/lib/form-spam-protection';
+import { getClientIp } from '@/lib/request-utils';
 
 // Disable caching for this route
 export const dynamic = 'force-dynamic';
@@ -75,31 +77,52 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Extract metadata from request if not provided
-    const metadata = body.metadata || {
+    const verdict = await screenFormSubmission(request.headers, body.payload);
+
+    if (verdict.outcome === 'reject') {
+      return NextResponse.json({ error: verdict.error }, { status: verdict.status });
+    }
+
+    const payload = stripHoneypotField(body.payload);
+
+    // Client-supplied metadata is untrusted, so request-derived values win
+    const metadata = {
+      ...(typeof body.metadata === 'object' && body.metadata ? body.metadata : {}),
+      ip: getClientIp(request.headers) || undefined,
       user_agent: request.headers.get('user-agent') || undefined,
       referrer: request.headers.get('referer') || undefined,
-      // Note: IP is typically handled by the proxy/edge, not available directly
     };
+
+    const isSpam = verdict.outcome === 'spam';
 
     const submission = await createFormSubmission({
       form_id: body.form_id,
-      payload: body.payload,
+      payload,
       metadata,
+      status: isSpam ? 'spam' : 'new',
     });
+
+    // Spam is stored for review but never notified, so bots stay silent.
+    // The response still reports success so they don't retry.
+    if (isSpam) {
+      return NextResponse.json(
+        { data: submission, message: 'Form submitted successfully' },
+        { status: 201 }
+      );
+    }
 
     // Dispatch webhook event (fire and forget)
     dispatchFormSubmittedEvent({
       form_id: body.form_id,
       submission_id: submission.id,
-      fields: body.payload,
+      fields: payload,
       metadata,
     });
 
     // Send email notification if enabled (fire and forget)
     if (body.email?.enabled && body.email?.to) {
       // Extract reply-to email from form payload (first email field found)
-      const replyTo = extractReplyToEmail(body.payload);
+      const replyTo = extractReplyToEmail(payload);
 
       sendFormSubmissionEmail(
         body.email.to,
@@ -107,7 +130,7 @@ export async function POST(request: NextRequest) {
         {
           formId: body.form_id,
           submissionId: submission.id,
-          payload: body.payload,
+          payload,
           metadata: {
             ...metadata,
             submitted_at: submission.created_at,
@@ -118,7 +141,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Process app integrations (fire and forget)
-    processAppIntegrations(body.form_id, submission.id, body.payload);
+    processAppIntegrations(body.form_id, submission.id, payload);
 
     return NextResponse.json(
       { data: submission, message: 'Form submitted successfully' },

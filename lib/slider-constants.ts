@@ -76,4 +76,17 @@ export const SWIPER_DATA_ATTR_MAP: Record<string, string> = {
   slideButtonNext: 'data-slider-next',
   slideBullets: 'data-slider-pagination',
   slideFraction: 'data-slider-fraction',
+  slideBullet: 'data-slider-bullet',
 };
+
+/** Accessible names for slider chrome that renders as a native button. */
+export const SLIDER_BUTTON_ARIA_LABELS: Record<string, string> = {
+  slideButtonPrev: 'Previous slide',
+  slideButtonNext: 'Next slide',
+  slideBullet: 'Go to slide',
+};
+
+/** Prev / next wrappers and bullets — not form submit buttons. */
+export function isSliderChromeButton(name: string): boolean {
+  return name === 'slideButtonPrev' || name === 'slideButtonNext' || name === 'slideBullet';
+}

@@ -564,8 +564,9 @@ export function useDesignSync({
 
   // Cleanup on unmount
   useEffect(() => {
+    const debouncedFns = debouncedFnMapRef.current;
     return () => {
-      debouncedFnMapRef.current.forEach(fn => fn.cancel());
+      debouncedFns.forEach(fn => fn.cancel());
     };
   }, []);
 
@@ -622,6 +623,9 @@ function mapClassToDesignValue(className: string, property: string): string | un
       'transition-transform': 'transform',
       'transition-none': 'none',
     },
+    overflow: {
+      'truncate': 'ellipsis',
+    },
   };
 
   if (fullClassMappings[property]?.[cleanClass]) {
@@ -638,6 +642,7 @@ function mapClassToDesignValue(className: string, property: string): string | un
     gridColumnSpan: 'col-span-',
     gridRowSpan: 'row-span-',
     lineClamp: 'line-clamp-',
+    textShadow: 'text-shadow-',
     translateX: 'translate-x-',
     translateY: 'translate-y-',
     skewX: 'skew-x-',

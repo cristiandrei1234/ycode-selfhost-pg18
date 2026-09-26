@@ -1,60 +1,45 @@
-import '@/app/site.css';
-import type { Metadata } from 'next';
-import RootLayoutShell, { defaultMetadata } from '@/components/RootLayoutShell';
+import type { ReactNode } from 'react';
+import { headers } from 'next/headers';
+import SiteDocumentLayout, { generateSiteMetadata } from '@/components/site-document-layout';
 import { fetchGlobalPageSettings } from '@/lib/generate-page-metadata';
-import { renderRootLayoutHeadCode } from '@/lib/parse-head-html';
+import { parsePathnameForPageHead } from '@/lib/page-head-path';
+import { resolveHtmlLang } from '@/lib/resolve-html-lang';
+import { getSiteBaseUrl } from '@/lib/url-utils';
 
-export async function generateMetadata(): Promise<Metadata> {
-  if (process.env.SKIP_SETUP === 'true') {
-    return defaultMetadata;
-  }
+export const generateMetadata = generateSiteMetadata;
 
-  try {
-    const globalSettings = await fetchGlobalPageSettings();
-    const metadata: Metadata = { ...defaultMetadata };
-
-    if (globalSettings.faviconUrl || globalSettings.webClipUrl) {
-      metadata.icons = {};
-      if (globalSettings.faviconUrl) {
-        metadata.icons.icon = globalSettings.faviconUrl;
-      }
-      if (globalSettings.webClipUrl) {
-        metadata.icons.apple = globalSettings.webClipUrl;
-      }
-    }
-
-    return metadata;
-  } catch {
-    return defaultMetadata;
-  }
-}
-
+/**
+ * Root layout for preview, pagination rewrites, and other non-published-page
+ * public routes. Published pages use `(published)/[[...slug]]` so they can
+ * set `<html lang>` from static params without calling headers().
+ */
 export default async function SiteLayout({
   children,
 }: Readonly<{
-  children: React.ReactNode;
+  children: ReactNode;
 }>) {
-  let headElements: React.ReactNode[] = [];
+  const headersList = await headers();
+  const pathname = headersList.get('x-pathname') || '/';
+  const { isPreview, slugPath } = parsePathnameForPageHead(pathname);
 
-  // Cloud mode uses ISR with explicit tenantId — calling headers() here
-  // would force all pages dynamic. Cloud injects global head code from PageRenderer instead.
-  if (process.env.SKIP_SETUP !== 'true') {
-    try {
-      const globalSettings = await fetchGlobalPageSettings();
-      if (globalSettings.globalCustomCodeHead) {
-        headElements = renderRootLayoutHeadCode(globalSettings.globalCustomCodeHead);
-      }
-    } catch {
-      // Supabase not configured — skip custom code
-    }
-  }
+  const [lang, globalSettings] = await Promise.all([
+    resolveHtmlLang(slugPath, !isPreview),
+    fetchGlobalPageSettings(isPreview).catch(() => null),
+  ]);
 
-  // Published sites render text with the browser-default (`auto`) font
-  // smoothing — matching legacy output. Forcing `antialiased` here would render
-  // glyphs thinner/lighter than the original site.
+  const baseUrl = getSiteBaseUrl({
+    globalCanonicalUrl: globalSettings?.globalCanonicalUrl ?? null,
+  });
+
   return (
-    <RootLayoutShell headElements={headElements} bodyClassName="font-sans">
+    <SiteDocumentLayout
+      lang={lang}
+      pathname={pathname}
+      baseUrl={baseUrl}
+      publishedAt={globalSettings?.publishedAt ?? null}
+      globalCustomCodeHead={globalSettings?.globalCustomCodeHead ?? null}
+    >
       {children}
-    </RootLayoutShell>
+    </SiteDocumentLayout>
   );
 }

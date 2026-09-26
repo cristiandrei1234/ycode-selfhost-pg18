@@ -43,7 +43,7 @@ export function useCollectionItemSearch(
 
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebounce(search, SEARCH_DEBOUNCE_MS);
-  const [isSearching, setIsSearching] = useState(false);
+  const [completedSearchKey, setCompletedSearchKey] = useState<string | null>(null);
 
   const items = useMemo(
     () => (collectionId ? itemsByCollection[collectionId] || [] : []),
@@ -55,23 +55,22 @@ export function useCollectionItemSearch(
   );
 
   const trimmedSearch = debouncedSearch.trim();
+  const searchKey = collectionId && trimmedSearch ? `${collectionId}:${trimmedSearch}` : null;
 
   useEffect(() => {
-    if (!collectionId || !trimmedSearch) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setIsSearching(false);
-      return;
-    }
+    if (!collectionId || !trimmedSearch) return;
 
     let cancelled = false;
-    setIsSearching(true);
     searchAndMergeItems(collectionId, trimmedSearch, SEARCH_LIMIT)
       .finally(() => {
-        if (!cancelled) setIsSearching(false);
+        if (!cancelled) setCompletedSearchKey(searchKey);
       });
 
     return () => { cancelled = true; };
-  }, [collectionId, trimmedSearch, searchAndMergeItems]);
+  }, [collectionId, trimmedSearch, searchKey, searchAndMergeItems]);
+
+  // Derived rather than stored, so the effect above never sets state synchronously
+  const isSearching = searchKey !== null && completedSearchKey !== searchKey;
 
   // Hydrate the selected item when it isn't part of the preloaded set so the
   // trigger can render its label without the user opening the dropdown first.

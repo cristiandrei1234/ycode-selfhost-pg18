@@ -42,6 +42,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Empty, EmptyDescription } from '@/components/ui/empty';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Slider } from '@/components/ui/slider';
@@ -51,6 +52,7 @@ import { Separator } from '@/components/ui/separator';
 import ColorPicker from './ColorPicker';
 
 // 3. Utils
+import { hideGsapElement, resetGsapDisplay, showGsapElement } from '@/lib/animation-display';
 import { cn, generateId } from '@/lib/utils';
 import { findLayerById } from '@/lib/layer-utils';
 import { getLayerName, getLayerIcon } from '@/lib/layer-display-utils';
@@ -187,9 +189,8 @@ function SortableAnimationItem({
         })()}
       </Badge>
 
-      <span
-        role="button"
-        tabIndex={0}
+      <button
+        type="button"
         className="-mr-0.5 p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
         onClick={(e) => {
           e.stopPropagation();
@@ -197,7 +198,7 @@ function SortableAnimationItem({
         }}
       >
         <Icon name="x" className="size-2.5" />
-      </span>
+      </button>
     </div>
   );
 }
@@ -321,11 +322,11 @@ export default function InteractionsPanel({
       // Use GSAP to clear transforms
       gsap.set(element, { clearProps: 'all' });
       element.setAttribute('style', originalStyle);
-      // Restore original hidden state
+      // Restore original hidden state (attribute and any stripped `hidden` classes)
       if (wasHidden) {
-        element.setAttribute('data-gsap-hidden', '');
+        hideGsapElement(element);
       } else {
-        element.removeAttribute('data-gsap-hidden');
+        resetGsapDisplay(element);
       }
       previewedElementRef.current = null;
     }
@@ -430,11 +431,11 @@ export default function InteractionsPanel({
     previewedElementsRef.current.forEach(({ element, originalStyle, wasHidden }) => {
       gsap.set(element, { clearProps: 'all' });
       element.setAttribute('style', originalStyle);
-      // Restore original hidden state
+      // Restore original hidden state (attribute and any stripped `hidden` classes)
       if (wasHidden) {
-        element.setAttribute('data-gsap-hidden', '');
+        hideGsapElement(element);
       } else {
-        element.removeAttribute('data-gsap-hidden');
+        resetGsapDisplay(element);
       }
     });
     previewedElementsRef.current.clear();
@@ -530,14 +531,14 @@ export default function InteractionsPanel({
     // Handle display via data-gsap-hidden attribute (same as AnimationInitializer)
     // 'visible' = remove attribute, 'hidden' = add attribute
     if (displayStart === 'visible') {
-      element.removeAttribute('data-gsap-hidden');
+      showGsapElement(element);
     }
 
     // Play the animation using iframe's GSAP (same context as SplitText)
     const tl = iframeGsap.timeline({
       onComplete: () => {
         if (displayEnd === 'hidden') {
-          element.setAttribute('data-gsap-hidden', '');
+          hideGsapElement(element);
         }
       },
     });
@@ -777,7 +778,7 @@ export default function InteractionsPanel({
       }
       // Handle display via data-gsap-hidden attribute (same as AnimationInitializer)
       if (displayStart === 'visible') {
-        timeline.call(() => element.removeAttribute('data-gsap-hidden'), undefined, position);
+        timeline.call(() => showGsapElement(element), undefined, position);
       }
 
       // Add tween to timeline using shared utility
@@ -791,7 +792,7 @@ export default function InteractionsPanel({
         splitText: effectiveSplitText,
         splitElements,
         onComplete: displayEnd === 'hidden'
-          ? () => element.setAttribute('data-gsap-hidden', '')
+          ? () => hideGsapElement(element)
           : undefined,
       });
     });
@@ -904,21 +905,26 @@ export default function InteractionsPanel({
     (interactionId: string) => {
       // Clear inline preview styles (e.g. backgroundColor) that were applied via
       // gsap.set on every tween in this interaction, otherwise they persist on
-      // the canvas after the trigger is removed.
-      const removedInteraction = interactions.find((i) => i.id === interactionId);
-      if (removedInteraction) {
-        const keysByLayer = new Map<string, Set<string>>();
-        (removedInteraction.tweens || []).forEach((tween) => {
-          const set = keysByLayer.get(tween.layer_id) || new Set<string>();
-          Object.keys(tween.from || {}).forEach((k) => set.add(k));
-          Object.keys(tween.to || {}).forEach((k) => set.add(k));
-          keysByLayer.set(tween.layer_id, set);
-        });
-        keysByLayer.forEach((keys, layerId) => {
-          clearLiveStyleForKeys(layerId, Array.from(keys));
-        });
+      // the canvas after the trigger is removed. Wrapped in try/catch: preview
+      // cleanup is cosmetic and must never block the actual removal below.
+      try {
+        const removedInteraction = interactions.find((i) => i.id === interactionId);
+        if (removedInteraction) {
+          const keysByLayer = new Map<string, Set<string>>();
+          (removedInteraction.tweens || []).forEach((tween) => {
+            const set = keysByLayer.get(tween.layer_id) || new Set<string>();
+            Object.keys(tween.from || {}).forEach((k) => set.add(k));
+            Object.keys(tween.to || {}).forEach((k) => set.add(k));
+            keysByLayer.set(tween.layer_id, set);
+          });
+          keysByLayer.forEach((keys, layerId) => {
+            clearLiveStyleForKeys(layerId, Array.from(keys));
+          });
+        }
+        clearAllPreviewStyles();
+      } catch (error) {
+        console.warn('Failed to clear interaction preview styles:', error);
       }
-      clearAllPreviewStyles();
 
       const updatedInteractions = interactions.filter((i) => i.id !== interactionId);
       onLayerUpdate(triggerLayer.id, { interactions: updatedInteractions });
@@ -986,16 +992,21 @@ export default function InteractionsPanel({
 
       // Clear any inline preview styles (e.g. backgroundColor) that were applied
       // via gsap.set during editing — otherwise they persist on the canvas after
-      // the tween is removed.
-      const removedTween = (selectedInteraction.tweens || []).find((t) => t.id === tweenId);
-      if (removedTween) {
-        const keys = Array.from(new Set([
-          ...Object.keys(removedTween.from || {}),
-          ...Object.keys(removedTween.to || {}),
-        ]));
-        clearLiveStyleForKeys(removedTween.layer_id, keys);
+      // the tween is removed. Wrapped in try/catch: preview cleanup is cosmetic
+      // and must never block the actual removal below.
+      try {
+        const removedTween = (selectedInteraction.tweens || []).find((t) => t.id === tweenId);
+        if (removedTween) {
+          const keys = Array.from(new Set([
+            ...Object.keys(removedTween.from || {}),
+            ...Object.keys(removedTween.to || {}),
+          ]));
+          clearLiveStyleForKeys(removedTween.layer_id, keys);
+        }
+        clearAllPreviewStyles();
+      } catch (error) {
+        console.warn('Failed to clear tween preview styles:', error);
       }
-      clearAllPreviewStyles();
 
       const updatedInteractions = updateInteractionById(
         interactions,
@@ -1095,15 +1106,20 @@ export default function InteractionsPanel({
 
       // Clear any inline preview styles (e.g. backgroundColor) that were applied
       // via gsap.set during editing — otherwise they persist on the canvas after
-      // the property is removed.
-      const targetTween = (selectedInteraction.tweens || []).find((t) => t.id === tweenId);
-      if (targetTween) {
-        clearLiveStyleForKeys(
-          targetTween.layer_id,
-          propertyOption.properties.map((p) => p.key as string)
-        );
+      // the property is removed. Wrapped in try/catch: preview cleanup is
+      // cosmetic and must never block the actual removal below.
+      try {
+        const targetTween = (selectedInteraction.tweens || []).find((t) => t.id === tweenId);
+        if (targetTween) {
+          clearLiveStyleForKeys(
+            targetTween.layer_id,
+            propertyOption.properties.map((p) => p.key as string)
+          );
+        }
+        clearAllPreviewStyles();
+      } catch (error) {
+        console.warn('Failed to clear property preview styles:', error);
       }
-      clearAllPreviewStyles();
 
       const updatedInteractions = updateInteractionById(
         interactions,
@@ -1245,9 +1261,8 @@ export default function InteractionsPanel({
                 {TRIGGER_LABELS[interaction.trigger]}
               </Label>
 
-              <span
-                role="button"
-                tabIndex={0}
+              <button
+                type="button"
                 className="ml-auto -my-1 -mr-0.5 p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -1255,7 +1270,7 @@ export default function InteractionsPanel({
                 }}
               >
                 <Icon name="x" className="size-2.5" />
-              </span>
+              </button>
             </div>
           ))}
         </div>
@@ -1834,6 +1849,29 @@ export default function InteractionsPanel({
 
           <div className="flex flex-col gap-2 pb-4">
             {(() => {
+              // A layer hidden via Visibility is normally left out of the page.
+              // A tween ending in Display: Visible (or "Keep in HTML when hidden")
+              // keeps it in the DOM collapsed so the interaction has a target.
+              const targetLayer = findLayerById(allLayers, selectedTween.layer_id);
+              if (!targetLayer?.settings?.hidden) return null;
+              const revealsTarget = selectedTween.to?.display === 'visible';
+              const keptInHtml = !!targetLayer.settings?.keepInHtml;
+              let message: string;
+              if (revealsTarget) {
+                message = 'This layer is hidden. It stays in the page collapsed and is shown by this animation.';
+              } else if (keptInHtml) {
+                message = 'This layer is hidden and kept in HTML collapsed. Set Display to Visible in this animation to show it.';
+              } else {
+                message = 'This layer is hidden and is not rendered, so this animation has no effect. Set Display to Visible in this animation, or make the layer visible.';
+              }
+              return (
+                <Alert variant={revealsTarget ? 'default' : 'warning'}>
+                  <AlertDescription>{message}</AlertDescription>
+                </Alert>
+              );
+            })()}
+
+            {(() => {
               const isAtMode = typeof selectedTween.position === 'number';
               const selectValue = isAtMode ? 'at' : String(selectedTween.position);
 
@@ -2126,14 +2164,13 @@ export default function InteractionsPanel({
                       <span className="text-xs text-muted-foreground">
                         {propertyOption.label}
                       </span>
-                      <span
-                        role="button"
-                        tabIndex={0}
+                      <button
+                        type="button"
                         className="p-0.5 rounded-sm opacity-70 hover:opacity-100 transition-opacity cursor-pointer"
                         onClick={() => handleRemovePropertyFromTween(selectedTween.id, propertyOption.type)}
                       >
                         <Icon name="x" className="size-2.5" />
-                      </span>
+                      </button>
                     </div>
 
                     {propertyOption.properties.map((prop) => {

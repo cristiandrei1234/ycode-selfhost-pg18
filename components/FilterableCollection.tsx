@@ -20,6 +20,10 @@ interface FilterableCollectionProps {
   /** Hard cap on the total — clamps the displayed count and `hasMore` so a
    * client-side reconcile matches the SSR-capped "Showing X of Y". */
   maxTotal?: number;
+  /** Leading records skipped by the collection's `offset` before pagination.
+   * Forwarded to the filter API so filtered paging composes offset the same
+   * way SSR does. */
+  baseOffset?: number;
   paginationMode?: 'pages' | 'load_more';
   layerTemplate: Layer[];
   collectionLayerClasses?: string[];
@@ -100,6 +104,7 @@ export default function FilterableCollection({
   sortOrderInputLayerId,
   limit,
   maxTotal,
+  baseOffset,
   paginationMode,
   layerTemplate,
   collectionLayerClasses,
@@ -586,7 +591,7 @@ export default function FilterableCollection({
       }
       loadMoreBtn.style.display = hasMore ? '' : 'none';
     }
-  }, [getSsrPaginationWrapper]);
+  }, [getSsrPaginationWrapper, toggleSsrWrapperHidden]);
 
   const restoreSsrPagination = useCallback(() => {
     const wrapper = getSsrPaginationWrapper();
@@ -753,6 +758,7 @@ export default function FilterableCollection({
         limit,
         offset,
         maxTotal,
+        baseOffset,
         published: isPublished,
         collectionLayerClasses,
         collectionLayerTag,
@@ -814,7 +820,7 @@ export default function FilterableCollection({
           abortRef.current = null;
         }
       });
-  }, [collectionId, collectionLayerId, layerTemplate, effectiveSortBy, effectiveSortOrder, limit, maxTotal, paginationMode, updateEmptyStateElements, injectFilteredHTML, showLoadingSkeleton, removeLoadingSkeleton, collectionLayerClasses, collectionLayerTag, isPublished, isPreview, pageCollectionItemId, pageCollectionSortedItemIds, collectionLayer]);
+  }, [collectionId, collectionLayerId, layerTemplate, effectiveSortBy, effectiveSortOrder, limit, maxTotal, baseOffset, paginationMode, updateEmptyStateElements, injectFilteredHTML, showLoadingSkeleton, removeLoadingSkeleton, collectionLayerClasses, collectionLayerTag, isPublished, isPreview, pageCollectionItemId, pageCollectionSortedItemIds, collectionLayer]);
 
   const fetchFilteredRef = useRef(fetchFiltered);
   useEffect(() => { fetchFilteredRef.current = fetchFiltered; }, [fetchFiltered]);
@@ -922,7 +928,10 @@ export default function FilterableCollection({
 
     const startOffset = (startPage - 1) * (limit || 10);
     fetchFiltered(filterGroups, startOffset, false);
-  }, [filterValues, buildApiFilters, fetchFiltered, paginationMode, attachPaginationIntercept, detachPaginationIntercept, restoreSsrPagination, getSsrPaginationWrapper, updateEmptyStateElements, fpKey, pKey, limit, hasRuntimeSortOverride, hasDynamicDateFilter, effectiveSortBy, effectiveSortOrder, showSSR, clearFilteredDOM, removeLoadingSkeleton]);
+    // Runs on filter-value changes only. The layer/template/filter-group config is read
+    // at fetch time; adding it would refetch on every render since those are new
+    // object identities each pass.
+  }, [filterValues, buildApiFilters, fetchFiltered, paginationMode, attachPaginationIntercept, detachPaginationIntercept, restoreSsrPagination, getSsrPaginationWrapper, updateEmptyStateElements, fpKey, pKey, limit, hasRuntimeSortOverride, hasDynamicDateFilter, effectiveSortBy, effectiveSortOrder, showSSR, clearFilteredDOM, removeLoadingSkeleton]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!hasActiveFilters || paginationMode !== 'pages') return;

@@ -127,7 +127,7 @@ const LeftSidebar = React.memo(function LeftSidebar({
 
     window.addEventListener('toggleElementLibrary', handleToggleElementLibrary);
     return () => window.removeEventListener('toggleElementLibrary', handleToggleElementLibrary);
-  }, []);
+  }, [setActiveSidebarTab]);
 
   // Listen for close ElementLibrary event (e.g., when clicking on canvas)
   useEffect(() => {
@@ -405,7 +405,7 @@ const LeftSidebar = React.memo(function LeftSidebar({
                 />
               )}
               <header className="py-5 flex justify-between shrink-0 z-20">
-                <span className="font-medium">Layers</span>
+                <span className="font-medium">{editingComponentId && editingComponent ? editingComponent.name : 'Layers'}</span>
                 {!readOnly && (
                   <div className="-my-1">
                     <Button

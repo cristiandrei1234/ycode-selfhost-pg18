@@ -330,7 +330,15 @@ const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPag
       return;
     }
 
-    if (pageId === currentPageId) return;
+    // Creating a folder selects it in the tree without changing the page on
+    // the canvas. Clicking that current page (usually Homepage) must still
+    // move the tree selection off the folder.
+    if (pageId === currentPageId) {
+      if (selectedItemIdRef.current !== pageId) {
+        setSelectedItemId(pageId);
+      }
+      return;
+    }
 
     // Set to body directly so the layer sync effect won't trigger a second URL update
     const { setSelectedLayerId } = useEditorStore.getState();
@@ -821,7 +829,16 @@ const LeftSidebarPages = React.forwardRef<LeftSidebarPagesHandle, LeftSidebarPag
                         </DropdownMenuItem>
                       ))
                     ) : (
-                      <DropdownMenuItem key={null} onClick={() => navigateToCollections()}>
+                      <DropdownMenuItem
+                        onSelect={() => {
+                          // Match the header CMS button: the view follows the
+                          // sidebar tab, not the URL alone.
+                          const { setActiveSidebarTab, setLastDesignUrl } = useEditorStore.getState();
+                          setLastDesignUrl(window.location.pathname + window.location.search);
+                          setActiveSidebarTab('cms');
+                          navigateToCollections();
+                        }}
+                      >
                         <Icon name="database" className="size-3 opacity-60" />
                         Add a collection
                       </DropdownMenuItem>

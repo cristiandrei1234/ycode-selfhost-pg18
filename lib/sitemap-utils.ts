@@ -16,6 +16,7 @@ import type {
 import { buildSlugPath } from './page-utils';
 import { buildPageHreflangAlternates } from './hreflang-utils';
 import type { HreflangAlternate } from './hreflang-utils';
+import { buildAbsolutePageUrl } from './url-utils';
 
 export interface SitemapUrl {
   loc: string;
@@ -25,6 +26,30 @@ export interface SitemapUrl {
 }
 
 export type SitemapAlternate = HreflangAlternate;
+
+/**
+ * Expand a page/item into one sitemap `<url>` per locale.
+ *
+ * Each locale gets its own `<loc>` (its localized URL) carrying the full
+ * reciprocal hreflang cluster, matching Google's recommended per-URL format.
+ * Single-locale sites (no alternates) yield a single default entry.
+ */
+function expandToPerLocaleSitemapUrls(
+  defaultLoc: string,
+  lastmod: string | undefined,
+  changefreq: SitemapChangeFrequency | undefined,
+  alternates: HreflangAlternate[]
+): SitemapUrl[] {
+  if (alternates.length === 0) {
+    return [{ loc: defaultLoc, lastmod, changefreq }];
+  }
+
+  // One <url> per locale. x-default duplicates the default locale's href, so
+  // skip it as a <loc> (it stays in the alternates cluster as a child link).
+  return alternates
+    .filter(alt => alt.hreflang !== 'x-default')
+    .map(alt => ({ loc: alt.href, lastmod, changefreq, alternates }));
+}
 
 /**
  * Build sitemap URLs for a static page (non-dynamic)
@@ -49,15 +74,9 @@ function buildStaticPageUrls(
 
   // Build the default (base) URL
   const defaultPath = buildSlugPath(page, folders, 'page');
-  const defaultUrl = `${baseUrl}${defaultPath}`;
+  const defaultUrl = buildAbsolutePageUrl(baseUrl, defaultPath);
 
-  const sitemapUrl: SitemapUrl = {
-    loc: defaultUrl,
-    lastmod: page.updated_at,
-    changefreq: settings.defaultChangeFrequency,
-  };
-
-  // Always add localized alternates when multiple locales exist
+  // Full reciprocal hreflang cluster (empty for single-locale sites)
   const alternates = buildPageHreflangAlternates({
     page,
     folders,
@@ -65,11 +84,14 @@ function buildStaticPageUrls(
     locales,
     translationsByLocale,
   });
-  if (alternates.length > 0) {
-    sitemapUrl.alternates = alternates;
-  }
 
-  return [sitemapUrl];
+  // Emit one <url> per locale so each localized page is listed directly
+  return expandToPerLocaleSitemapUrls(
+    defaultUrl,
+    page.updated_at,
+    settings.defaultChangeFrequency,
+    alternates
+  );
 }
 
 /**
@@ -109,28 +131,25 @@ function buildDynamicPageUrls(
     if (!slugValue) continue;
 
     const itemPath = folderPath ? `${folderPath}/${slugValue}` : `/${slugValue}`;
-    const itemUrl = `${baseUrl}${itemPath}`;
+    const itemUrl = buildAbsolutePageUrl(baseUrl, itemPath);
 
-    const sitemapUrl: SitemapUrl = {
-      loc: itemUrl,
-      lastmod: item.updated_at,
-      changefreq: settings.defaultChangeFrequency,
-    };
-
-    // Always add localized alternates when multiple locales exist
+    // Full reciprocal hreflang cluster (empty for single-locale sites)
     const alternates = buildPageHreflangAlternates({
       page,
       folders,
       baseUrl,
       locales,
       translationsByLocale,
-      dynamicSlug: { itemId: item.id, fieldId: slugFieldId, defaultValue: slugValue },
+      dynamicSlug: { itemId: item.id, defaultValue: slugValue },
     });
-    if (alternates.length > 0) {
-      sitemapUrl.alternates = alternates;
-    }
 
-    urls.push(sitemapUrl);
+    // Emit one <url> per locale so each localized item is listed directly
+    urls.push(...expandToPerLocaleSitemapUrls(
+      itemUrl,
+      item.updated_at,
+      settings.defaultChangeFrequency,
+      alternates
+    ));
   }
 
   return urls;

@@ -16,14 +16,14 @@ import {
   ContextMenuSeparator, ContextMenuShortcut, ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
-import { useCanvasPortalContainer, useCanvasZoom } from '@/lib/canvas-portal-context';
+import { remapIframePointerEventToParent, useCanvasPortalContainer, useCanvasZoom } from '@/lib/canvas-portal-context';
 import { useEditorStore } from '@/stores/useEditorStore';
 import { usePagesStore } from '@/stores/usePagesStore';
 import { useClipboardStore } from '@/stores/useClipboardStore';
 import { useExternalPasteStore } from '@/stores/useExternalPasteStore';
 import { isClipboardReadGranted, readExternalDesignClipboard } from '@/lib/import/clipboard-detect';
 import { useComponentsStore } from '@/stores/useComponentsStore';
-import { canHaveChildren, canPasteIntoParent, LINK_NESTING_ERROR, findLayerById, getClassesString, regenerateInteractionIds, canCopyLayer, canDeleteLayer, regenerateIdsWithInteractionRemapping, removeLayerById, findParentAndIndex, insertLayerAfter, updateLayerProps, canConvertToCollection, isExcludedFromCollection, getCollectionVariable, resetBindingsOnCollectionSourceChange } from '@/lib/layer-utils';
+import { canHaveChildren, canPasteIntoParent, LINK_NESTING_ERROR, findLayerById, getClassesString, regenerateInteractionIds, canCopyLayer, canDeleteLayer, regenerateIdsWithInteractionRemapping, removeLayerById, findParentAndIndex, insertLayerAfter, updateLayerProps, canConvertToCollection, isExcludedFromCollection, getCollectionVariable, getTextHeadingConversion, resetBindingsOnCollectionSourceChange } from '@/lib/layer-utils';
 import { getStyleIds } from '@/lib/layer-style-resolve';
 import { getLayerIcon, getLayerName } from '@/lib/layer-display-utils';
 import { cloneDeep } from 'lodash';
@@ -54,9 +54,18 @@ interface LayerContextMenuProps {
 
 let pendingCloseRaf = 0;
 let activeMenuDocument: Document | null = null;
+let iframeDismissDoc: Document | null = null;
 let selectionFromMenu = false;
 
+function clearIframeDismissListener() {
+  if (iframeDismissDoc) {
+    iframeDismissDoc.removeEventListener('pointerdown', dismissActiveContextMenu, true);
+    iframeDismissDoc = null;
+  }
+}
+
 function dismissActiveContextMenu() {
+  clearIframeDismissListener();
   if (activeMenuDocument) {
     activeMenuDocument.dispatchEvent(
       new PointerEvent('pointerdown', { bubbles: true })
@@ -106,7 +115,7 @@ function LayerContextMenuInner({
   onLayerSelect,
   liveLayerUpdates,
   liveComponentUpdates,
-  editingComponentId = null,
+  editingComponentId: editingComponentIdProp = null,
   isComponentDialogOpen,
   setIsComponentDialogOpen,
   isLayoutDialogOpen,
@@ -121,7 +130,10 @@ function LayerContextMenuInner({
   setLayerName,
 }: LayerContextMenuInnerProps) {
   const canvasPortalContainer = useCanvasPortalContainer();
-  const canvasZoom = useCanvasZoom();
+  // Canvas React trees run in the parent JS realm, so `document.body` is the
+  // parent document. Portal there so the menu is not clipped by the iframe
+  // (component-edit canvases are sized to content).
+  const menuPortalContainer = canvasPortalContainer ? document.body : undefined;
 
   const copyLayer = usePagesStore((state) => state.copyLayer);
   const deleteLayer = usePagesStore((state) => state.deleteLayer);
@@ -138,6 +150,12 @@ function LayerContextMenuInner({
   const components = useComponentsStore((state) => state.components);
   const componentDrafts = useComponentsStore((state) => state.componentDrafts);
   const editingComponentVariantId = useEditorStore((state) => state.editingComponentVariantId);
+  // Prefer the prop (passed by the layers tree) but fall back to the editor
+  // store so the canvas context menu also knows when a component is being
+  // edited — otherwise "Create component" on the canvas resolves against the
+  // page draft and silently fails for layers inside a component.
+  const storeEditingComponentId = useEditorStore((state) => state.editingComponentId);
+  const editingComponentId = editingComponentIdProp ?? storeEditingComponentId;
   // Resolve the active variant id for the component being edited. When
   // unspecified (or pointing at a missing variant) we fall back to the first
   // variant so the editor never shows an empty tree.
@@ -767,6 +785,25 @@ function LayerContextMenuInner({
     }
   };
 
+  const handleConvertTextHeading = () => {
+    if (!layer) return;
+
+    const conversion = getTextHeadingConversion(layer);
+    if (!conversion) return;
+
+    if (isComponentContext && editingComponentId) {
+      updateComponentAndBroadcast(updateLayerProps(getComponentLayers(), layerId, conversion));
+    } else {
+      updateLayer(pageId, layerId, conversion);
+      if (liveLayerUpdates) {
+        liveLayerUpdates.broadcastLayerUpdate(layerId, conversion);
+      }
+    }
+  };
+
+  const textHeadingConversion = layer ? getTextHeadingConversion(layer) : null;
+  const showConvertTextHeading = !!textHeadingConversion && !isComponentInstance;
+
   const isCollection = !!(layer && getCollectionVariable(layer));
   const canConvert = !!(layer && canConvertToCollection(layer));
   const showConvertOption = !!(layer && !isCollection && canHaveChildren(layer) && !layer.componentId);
@@ -779,8 +816,7 @@ function LayerContextMenuInner({
     <>
       <ContextMenuContent
         className="w-46"
-        container={canvasPortalContainer}
-        style={canvasPortalContainer ? { zoom: 100 / canvasZoom } : undefined}
+        container={menuPortalContainer}
       >
         {canvasPortalContainer && layer && (
           <>
@@ -808,8 +844,7 @@ function LayerContextMenuInner({
         <ContextMenuSub>
           <ContextMenuSubTrigger>Paste</ContextMenuSubTrigger>
           <ContextMenuSubContent
-            container={canvasPortalContainer}
-            style={canvasPortalContainer ? { zoom: 100 / canvasZoom } : undefined}
+            container={menuPortalContainer}
           >
             {hasExternal && (externalKind === 'figma' || externalKind === 'webflow') && (
               <>
@@ -896,6 +931,22 @@ function LayerContextMenuInner({
           Export as HTML
           <ContextMenuShortcut><Icon name="code" className="size-3" /></ContextMenuShortcut>
         </ContextMenuItem>
+
+        {showConvertTextHeading && textHeadingConversion && (
+          <>
+            <ContextMenuSeparator />
+
+            <ContextMenuItem onClick={handleConvertTextHeading} disabled={isLocked}>
+              {textHeadingConversion.name === 'heading' ? 'Convert to heading' : 'Convert to text'}
+              <ContextMenuShortcut>
+                <Icon
+                  name={textHeadingConversion.name === 'heading' ? 'heading' : 'text'}
+                  className="size-3"
+                />
+              </ContextMenuShortcut>
+            </ContextMenuItem>
+          </>
+        )}
 
         {(showConvertOption || isCollection) && (
           <>
@@ -1012,6 +1063,7 @@ function LayerContextMenu({
   const [exportHtml, setExportHtml] = useState('');
   const [layerName, setLayerName] = useState('');
   const canvasPortalContainer = useCanvasPortalContainer();
+  const canvasZoom = useCanvasZoom();
 
   const anyDialogOpen =
     isComponentDialogOpen || isLayoutDialogOpen || isImportHtmlOpen || isExportHtmlOpen;
@@ -1023,7 +1075,14 @@ function LayerContextMenu({
 
       if (open) {
         dismissActiveContextMenu();
-        activeMenuDocument = canvasPortalContainer?.ownerDocument ?? document;
+        // Canvas menus portal to the parent document so they sit above the
+        // iframe. Dismiss must target that document; iframe clicks are wired
+        // separately because they don't bubble across the frame boundary.
+        activeMenuDocument = document;
+        if (canvasPortalContainer) {
+          iframeDismissDoc = canvasPortalContainer.ownerDocument;
+          iframeDismissDoc.addEventListener('pointerdown', dismissActiveContextMenu, true);
+        }
 
         // Detect a Webflow/Figma copy on the OS clipboard so the Paste submenu
         // can offer "Paste after / inside". Best-effort and silent: only read
@@ -1056,6 +1115,7 @@ function LayerContextMenu({
           cancelAnimationFrame(pendingCloseRaf);
           useEditorStore.getState().setCanvasContextMenuOpen(true);
         } else {
+          clearIframeDismissListener();
           pendingCloseRaf = requestAnimationFrame(() => {
             useEditorStore.getState().setCanvasContextMenuOpen(false);
           });
@@ -1071,7 +1131,12 @@ function LayerContextMenu({
     <ContextMenu onOpenChange={handleOpenChange}>
       <ContextMenuTrigger
         asChild
-        onContextMenu={(e) => e.stopPropagation()}
+        onContextMenu={(e) => {
+          e.stopPropagation();
+          if (canvasPortalContainer) {
+            remapIframePointerEventToParent(e, canvasPortalContainer, canvasZoom);
+          }
+        }}
       >
         {children}
       </ContextMenuTrigger>

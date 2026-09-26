@@ -25,6 +25,7 @@ import {
 import {
   Sheet,
   SheetContent,
+  SheetDescription,
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
@@ -38,7 +39,7 @@ import {
 import { InputGroup, InputGroupAddon, InputGroupInput } from '@/components/ui/input-group';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Checkbox } from '@/components/ui/checkbox';
-import type { FormSubmission, FormSummary, FormSubmissionStatus } from '@/types';
+import type { FormSubmission, FormSubmissionMetadata, FormSummary, FormSubmissionStatus } from '@/types';
 
 // API functions
 async function fetchFormSummaries(): Promise<FormSummary[]> {
@@ -79,6 +80,32 @@ type SortConfig = {
   direction: 'asc' | 'desc';
 } | null;
 
+/** Compare two URLs ignoring a trailing slash. */
+function isSameUrl(a?: string, b?: string): boolean {
+  if (!a || !b) return false;
+  return a.replace(/\/$/, '') === b.replace(/\/$/, '');
+}
+
+/** Label/value rows for the submission metadata, skipping empty or redundant entries. */
+function getMetadataRows(metadata: FormSubmissionMetadata | null): { label: string; value: string }[] {
+  if (!metadata) return [];
+
+  const rows: { label: string; value: string }[] = [];
+
+  if (metadata.page_url) {
+    rows.push({ label: 'Page', value: metadata.page_url });
+  }
+  // A referrer matching the page is just the form's own URL repeated
+  if (metadata.referrer && !isSameUrl(metadata.referrer, metadata.page_url)) {
+    rows.push({ label: 'Referrer', value: metadata.referrer });
+  }
+  if (metadata.user_agent) {
+    rows.push({ label: 'User agent', value: metadata.user_agent });
+  }
+
+  return rows;
+}
+
 // API function to delete all submissions for a form
 async function deleteForm(formId: string): Promise<void> {
   const response = await fetch(`/ycode/api/form-submissions?form_id=${encodeURIComponent(formId)}`, {
@@ -105,6 +132,8 @@ export default function FormsPage() {
   const [submissionToDelete, setSubmissionToDelete] = useState<string | null>(null);
   const [selectedSubmissionIds, setSelectedSubmissionIds] = useState<Set<string>>(new Set());
   const [showBulkDeleteDialog, setShowBulkDeleteDialog] = useState(false);
+
+  const metadataRows = getMetadataRows(selectedSubmission?.metadata ?? null);
 
   // Load form summaries on mount
   useEffect(() => {
@@ -736,6 +765,9 @@ export default function FormsPage() {
         <SheetContent className="sm:max-w-lg overflow-y-auto">
           <SheetHeader>
             <SheetTitle>Submission Details</SheetTitle>
+            <SheetDescription className="sr-only">
+              Form data and request metadata for the selected submission.
+            </SheetDescription>
           </SheetHeader>
 
           {selectedSubmission && (
@@ -786,29 +818,20 @@ export default function FormsPage() {
               </div>
 
               {/* Metadata */}
-              {selectedSubmission.metadata && Object.keys(selectedSubmission.metadata).length > 0 && (
+              {metadataRows.length > 0 && (
                 <div className="space-y-4">
                   <h3 className="font-medium text-xs">Metadata</h3>
-                  <div className="space-y-2 text-xs text-muted-foreground">
-                    {selectedSubmission.metadata.page_url && (
-                      <div>
-                        <span className="font-medium">Page: </span>
-                        {selectedSubmission.metadata.page_url}
+                  <dl className="divide-y divide-border text-xs">
+                    {metadataRows.map(({ label, value }) => (
+                      <div
+                        key={label}
+                        className="grid grid-cols-4 gap-2 py-3 first:pt-0 last:pb-0"
+                      >
+                        <dt className="text-muted-foreground">{label}</dt>
+                        <dd className="col-span-3 wrap-break-word">{value}</dd>
                       </div>
-                    )}
-                    {selectedSubmission.metadata.referrer && (
-                      <div>
-                        <span className="font-medium">Referrer: </span>
-                        {selectedSubmission.metadata.referrer}
-                      </div>
-                    )}
-                    {selectedSubmission.metadata.user_agent && (
-                      <div>
-                        <span className="font-medium">User Agent: </span>
-                        <span className="break-all">{selectedSubmission.metadata.user_agent}</span>
-                      </div>
-                    )}
-                  </div>
+                    ))}
+                  </dl>
                 </div>
               )}
 

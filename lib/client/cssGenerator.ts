@@ -8,6 +8,7 @@
 'use client';
 
 import type { Component, Layer } from '@/types';
+import { collectKeptHiddenLayerIds } from '@/lib/animation-utils';
 import { DEFAULT_TEXT_STYLES } from '@/lib/text-format-utils';
 import { TAILWIND_CUSTOM_VARIANTS } from '@/lib/tailwind-custom-variants';
 
@@ -19,6 +20,8 @@ import { TAILWIND_CUSTOM_VARIANTS } from '@/lib/tailwind-custom-variants';
 function extractClassesFromLayers(layers: Layer[]): Set<string> {
   const classes = new Set<string>();
   const processedComponentIds = new Set<string>();
+  // Hidden layers kept in HTML (reveal interaction / keepInHtml) render collapsed, so their classes are needed.
+  const keptHidden = collectKeptHiddenLayerIds(layers);
 
   // Helper to extract classes from a string or array
   const extractClasses = (classValue: string | string[] | undefined) => {
@@ -36,7 +39,9 @@ function extractClassesFromLayers(layers: Layer[]): Set<string> {
   };
 
   function processLayer(layer: Layer): void {
-    if (layer.settings?.hidden) return;
+    // Variable-driven visibility differs per instance (and components are only
+    // walked once), so those layers always contribute their classes.
+    if (layer.settings?.hidden && !layer.settings.visibilityVariableId && !keptHidden.has(layer.id)) return;
 
     // Skip if we've already processed this component
     if (layer.componentId) {

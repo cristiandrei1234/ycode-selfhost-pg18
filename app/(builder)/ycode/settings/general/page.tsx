@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/select';
 import { ButtonGroup } from '@/components/ui/button-group';
 import { Button } from '@/components/ui/button';
+import { CodeEditor } from '@/components/ui/code-editor';
 import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
@@ -305,7 +306,7 @@ export default function GeneralSettingsPage() {
       setIsResetting(false);
       setShowResetDialog(false);
     }
-  }, [router]);
+  }, []);
 
   return (
     <div className="p-8">
@@ -657,7 +658,7 @@ export default function GeneralSettingsPage() {
 
                     <TabsContent value="ycode-sitemap" className="mt-4 space-y-6">
                       <p className="text-sm text-muted-foreground">
-                        The sitemap automatically includes localized URLs with hreflang alternates and excludes pages marked with noindex.
+                        The sitemap lists each localized URL as its own entry with reciprocal hreflang alternates and excludes pages marked with noindex.
                       </p>
 
                       <Field>
@@ -745,10 +746,9 @@ export default function GeneralSettingsPage() {
                   <FieldDescription>
                     Enter code that will be injected into the &lt;head&gt; tag on every page of your site.
                   </FieldDescription>
-                  <Textarea
-                    id="global-code-head"
+                  <CodeEditor
                     value={customCodeHead}
-                    onChange={(e) => setCustomCodeHead(e.target.value)}
+                    onValueChange={setCustomCodeHead}
                     placeholder={'<script src="..."></script>\n<link rel="stylesheet" href="...">'}
                     className="min-h-30"
                   />
@@ -761,10 +761,9 @@ export default function GeneralSettingsPage() {
                   <FieldDescription>
                     Enter code that will be injected before the &lt;/body&gt; tag on every page of your site.
                   </FieldDescription>
-                  <Textarea
-                    id="global-code-body"
+                  <CodeEditor
                     value={customCodeBody}
-                    onChange={(e) => setCustomCodeBody(e.target.value)}
+                    onValueChange={setCustomCodeBody}
                     placeholder={'<script>...</script>'}
                     className="min-h-30"
                   />

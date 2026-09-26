@@ -22,6 +22,11 @@ export function getEffectiveApplyStyle(
   propertyKey: TweenPropertyKey,
   applyStyles: InteractionTween['apply_styles'] | undefined
 ): ApplyStyles {
+  // Note: a Display `from: hidden` applied on trigger is a no-op (the timeline
+  // removes `data-gsap-hidden` in the same tick), so the user must opt into
+  // on-load for click/hover reveals. Forcing on-load here was tried and rejected:
+  // an unscoped reveal would hide its target on every breakpoint at load, which
+  // breaks e.g. a desktop nav whose menu is only revealed by a mobile hamburger.
   const explicit = applyStyles?.[propertyKey];
   if (explicit) return explicit;
   if (IMPLICIT_ON_LOAD_TRIGGERS.includes(trigger)) return 'on-load';
@@ -543,9 +548,91 @@ export interface EditorHiddenLayerInfo {
 }
 
 /**
+ * Layer IDs that some interaction can reveal — targets of a tween whose `to`
+ * display is `visible`.
+ */
+export function collectRevealableLayerIds(layers: Layer[]): Set<string> {
+  const ids = new Set<string>();
+
+  const traverse = (layerList: Layer[]) => {
+    layerList.forEach((layer) => {
+      layer.interactions?.forEach((interaction) => {
+        (interaction.tweens || []).forEach((tween) => {
+          if (tween.to?.display === 'visible') ids.add(tween.layer_id);
+        });
+      });
+      if (layer.children) traverse(layer.children);
+    });
+  };
+
+  traverse(layers);
+  return ids;
+}
+
+/**
+ * Layers hidden via `settings.hidden` that must stay in the DOM.
+ *
+ * `settings.hidden` normally removes a layer from the output entirely. Two
+ * things keep it instead, rendered collapsed (`data-gsap-hidden`, every
+ * breakpoint) the same way a `from: hidden` display tween works:
+ * - an interaction targets it with Display → Visible (automatic), or
+ * - the layer opts in via `settings.keepInHtml` (for custom code reveals).
+ * Hidden layers matching neither stay out of the DOM.
+ */
+export function collectKeptHiddenLayerIds(layers: Layer[]): Set<string> {
+  const ids = new Set<string>();
+  const revealable = collectRevealableLayerIds(layers);
+
+  const traverse = (layerList: Layer[]) => {
+    layerList.forEach((layer) => {
+      if (layer.settings?.hidden && (layer.settings.keepInHtml || revealable.has(layer.id))) {
+        ids.add(layer.id);
+      }
+      if (layer.children) traverse(layer.children);
+    });
+  };
+
+  traverse(layers);
+  return ids;
+}
+
+/**
+ * Whether a tween's on-load `from` state leaves the element hidden, so the
+ * editor should hide it by default and reveal it on selection. Covers explicit
+ * `display: hidden` (any trigger) plus toggle triggers (hover/click) whose
+ * resting state hides via opacity, scale-to-zero, or a translate that moves the
+ * element away (e.g. a slide-out dropdown clipped by an `overflow-hidden`
+ * wrapper). Intro triggers (load/scroll-into-view) reveal permanent content, so
+ * their transform/opacity `from` states must NOT hide it in the editor.
+ */
+function tweenHidesOnLoad(interaction: LayerInteraction, tween: InteractionTween): boolean {
+  const { trigger } = interaction;
+  const from = tween.from;
+  if (!from) return false;
+  const apply = tween.apply_styles;
+
+  if (from.display === 'hidden' && getEffectiveApplyStyle(trigger, 'display', apply) === 'on-load') {
+    return true;
+  }
+
+  if (trigger !== 'hover' && trigger !== 'click') return false;
+
+  const isOnLoad = (key: TweenPropertyKey) => getEffectiveApplyStyle(trigger, key, apply) === 'on-load';
+  const num = (v: unknown) => (v === null || v === undefined ? NaN : parseFloat(String(v)));
+
+  if (from.autoAlpha != null && isOnLoad('autoAlpha') && num(from.autoAlpha) === 0) return true;
+  if (from.scale != null && isOnLoad('scale') && num(from.scale) === 0) return true;
+  if (from.x != null && isOnLoad('x') && num(from.x) !== 0) return true;
+  if (from.y != null && isOnLoad('y') && num(from.y) !== 0) return true;
+
+  return false;
+}
+
+/**
  * Collect layer IDs that should be visually hidden on canvas in edit mode
- * These are layers with display: hidden animation and apply_styles: on-load
- * Returns a Map of layerId -> breakpoints (empty = all breakpoints)
+ * (display: hidden, or a toggle's on-load hidden resting state) so they're
+ * revealed only when selected. Returns a Map of layerId -> breakpoints
+ * (empty = all breakpoints).
  */
 export function collectEditorHiddenLayerIds(layers: Layer[]): Map<string, Breakpoint[]> {
   const hiddenLayerMap = new Map<string, Breakpoint[]>();
@@ -555,12 +642,7 @@ export function collectEditorHiddenLayerIds(layers: Layer[]): Map<string, Breakp
       if (layer.interactions) {
         layer.interactions.forEach((interaction) => {
           (interaction.tweens || []).forEach((tween) => {
-            // Check if display: hidden with effective on-load apply style
-            // (explicit on-load OR intro trigger like load/scroll-into-view)
-            if (
-              tween.from?.display === 'hidden' &&
-              getEffectiveApplyStyle(interaction.trigger, 'display', tween.apply_styles) === 'on-load'
-            ) {
+            if (tweenHidesOnLoad(interaction, tween)) {
               const breakpoints = interaction.timeline?.breakpoints || [];
               const existing = hiddenLayerMap.get(tween.layer_id);
 
@@ -590,6 +672,13 @@ export function collectEditorHiddenLayerIds(layers: Layer[]): Map<string, Breakp
   };
 
   traverse(layers);
+
+  // Hidden layers kept in the DOM (reveal interaction / keepInHtml) are
+  // collapsed on every breakpoint, regardless of an interaction's own scope.
+  collectKeptHiddenLayerIds(layers).forEach((layerId) => {
+    hiddenLayerMap.set(layerId, []);
+  });
+
   return hiddenLayerMap;
 }
 
@@ -789,6 +878,19 @@ export function generateInitialAnimationCSS(layers: Layer[]): InitialAnimationRe
   };
 
   collectStyles(layers);
+
+  // Hidden layers kept in the DOM (reveal interaction / keepInHtml) start
+  // collapsed on every breakpoint. Replace any breakpoint-scoped entry so the unscoped one
+  // wins in the renderer's first-match lookup.
+  const keptHidden = collectKeptHiddenLayerIds(layers);
+  if (keptHidden.size > 0) {
+    for (let i = hiddenLayerInfo.length - 1; i >= 0; i--) {
+      if (keptHidden.has(hiddenLayerInfo[i].layerId)) hiddenLayerInfo.splice(i, 1);
+    }
+    keptHidden.forEach((layerId) => {
+      hiddenLayerInfo.push({ layerId, breakpoints: null });
+    });
+  }
 
   // Generate final CSS with media queries
   rulesByMediaQuery.forEach((rules, mediaQuery) => {

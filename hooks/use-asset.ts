@@ -4,7 +4,7 @@
  * Provides a simple interface for components to get asset details by ID
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { useAssetsStore } from '@/stores/useAssetsStore';
 import type { Asset } from '@/types';
 
@@ -14,8 +14,10 @@ import type { Asset } from '@/types';
  * Automatically loads assets store if not already loaded
  */
 export function useAsset(assetId: string | null | undefined): Asset | null {
-  const [asset, setAsset] = useState<Asset | null>(null);
-  const { getAsset, loadAssets, isLoaded } = useAssetsStore();
+  const asset = useAssetsStore(state => (assetId ? state.assetsById[assetId] ?? null : null));
+  const getAsset = useAssetsStore(state => state.getAsset);
+  const loadAssets = useAssetsStore(state => state.loadAssets);
+  const isLoaded = useAssetsStore(state => state.isLoaded);
 
   useEffect(() => {
     // Load assets if not already loaded
@@ -24,38 +26,13 @@ export function useAsset(assetId: string | null | undefined): Asset | null {
     }
   }, [isLoaded, loadAssets]);
 
+  // `getAsset` kicks off a background fetch for ids missing from the cache;
+  // the selector above picks the asset up once it lands in the store.
   useEffect(() => {
-    if (!assetId) {
-      setAsset(null);
-      return;
+    if (assetId) {
+      getAsset(assetId);
     }
-
-    const foundAsset = getAsset(assetId);
-    setAsset(foundAsset);
   }, [assetId, getAsset]);
 
   return asset;
-}
-
-/**
- * Hook to get multiple assets by IDs
- * Returns an array of assets (nulls for not found)
- */
-export function useAssets(assetIds: (string | null | undefined)[]): (Asset | null)[] {
-  const [assets, setAssets] = useState<(Asset | null)[]>([]);
-  const { getAsset, loadAssets, isLoaded } = useAssetsStore();
-
-  useEffect(() => {
-    // Load assets if not already loaded
-    if (!isLoaded) {
-      loadAssets();
-    }
-  }, [isLoaded, loadAssets]);
-
-  useEffect(() => {
-    const foundAssets = assetIds.map(id => id ? getAsset(id) : null);
-    setAssets(foundAssets);
-  }, [assetIds, getAsset]);
-
-  return assets;
 }

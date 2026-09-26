@@ -3,6 +3,7 @@ import { timingSafeEqual } from 'crypto';
 import { getSupabaseAdmin } from '@/lib/supabase-server';
 import { noCache } from '@/lib/api-response';
 import { parseAuthCookie, buildAuthCookieValue, PAGE_AUTH_COOKIE_NAME } from '@/lib/page-auth';
+import { getClientIp } from '@/lib/request-utils';
 
 /**
  * Constant-time string comparison to prevent timing attacks
@@ -78,9 +79,7 @@ interface VerifyRequest {
 export async function POST(request: NextRequest) {
   try {
     // Get client IP for rate limiting
-    const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() 
-      || request.headers.get('x-real-ip') 
-      || 'unknown';
+    const ip = getClientIp(request.headers) || 'unknown';
 
     // Check rate limit
     const { allowed, remainingAttempts } = checkRateLimit(ip);

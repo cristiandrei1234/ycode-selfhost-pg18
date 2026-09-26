@@ -7,6 +7,7 @@
  */
 
 import React, { useState, useCallback, useEffect } from 'react';
+import Link from 'next/link';
 
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -224,7 +225,7 @@ export default function FormSettings({ layer, onLayerUpdate }: FormSettingsProps
     >
       {!isSmtpEnabled && isSmtpEnabled !== null && (
         <div className="text-xs text-muted-foreground text-center py-4">
-          Configure <a href="/ycode/settings/email" className="underline hover:text-foreground">Email in Settings</a> to use email notifications.
+          Configure <Link href="/ycode/settings/email" className="underline hover:text-foreground">Email in Settings</Link> to use email notifications.
         </div>
       )}
 

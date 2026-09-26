@@ -11,6 +11,7 @@ import type {
 import { buildLocalizedSlugPath, buildLocalizedDynamicPageUrl } from '@/lib/page-utils';
 import { isAssetFieldType, isVirtualAssetField } from '@/lib/collection-field-utils';
 import { resolveInlineVariablesFromData } from '@/lib/inline-variables';
+import { getInlineSvgAssetUrl } from '@/lib/asset-utils';
 
 // ============================================================================
 // LinkSettings Validation
@@ -243,6 +244,69 @@ export function resolveRefCollectionItemId(
 }
 
 /**
+ * Minimal asset shape needed to resolve an asset link to an href. `id`,
+ * `filename`, `width` and `height` let inline-SVG assets (markup in `content`,
+ * no `public_url`) route through the `/a/` proxy.
+ */
+export interface LinkAssetLike {
+  id?: string;
+  filename?: string;
+  public_url?: string | null;
+  content?: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+/**
+ * Pre-resolved (SSR) asset entry shared between the page renderers and link
+ * resolution. `url` is either a servable URL or, for inline-SVG assets, the raw
+ * markup (starts with `<`) so icon layers can render it inline.
+ */
+export interface ResolvedAsset {
+  url: string;
+  filename?: string;
+  width?: number | null;
+  height?: number | null;
+}
+
+/**
+ * Resolve an asset to a navigable href. Storage-backed assets use their
+ * `public_url`; inline-SVG assets (no `public_url`, markup in `content`) are
+ * served through the `/a/` proxy so the link can be opened or downloaded — a
+ * data URI would be blocked for top-level navigation and has no filename.
+ */
+export function resolveAssetLinkHref(
+  assetId: string,
+  asset: LinkAssetLike | null | undefined
+): string | null {
+  if (!asset) return null;
+  if (asset.public_url) return asset.public_url;
+  if (!asset.content) return null;
+
+  return getInlineSvgAssetUrl({
+    id: asset.id || assetId,
+    // The name segment is cosmetic; the proxy redirects to the canonical one.
+    filename: asset.filename || 'file',
+    content: asset.content,
+    width: asset.width,
+    height: asset.height,
+  });
+}
+
+/** Convert a pre-resolved (SSR) asset entry into the shape `resolveAssetLinkHref` expects. */
+function assetFromResolvedEntry(assetId: string, entry: ResolvedAsset): LinkAssetLike {
+  const isInlineSvg = entry.url.startsWith('<');
+  return {
+    id: assetId,
+    filename: entry.filename,
+    public_url: isInlineSvg ? null : entry.url,
+    content: isInlineSvg ? entry.url : null,
+    width: entry.width,
+    height: entry.height,
+  };
+}
+
+/**
  * Context for resolving links (page, asset, field types)
  */
 export interface LinkResolutionContext {
@@ -262,10 +326,10 @@ export interface LinkResolutionContext {
   isPreview?: boolean;
   locale?: Locale | null;
   translations?: Record<string, any> | null;
-  getAsset?: (id: string) => { public_url?: string | null; content?: string | null } | null;
+  getAsset?: (id: string) => LinkAssetLike | null;
   anchorMap?: Record<string, string>;
-  /** Pre-resolved assets (asset_id -> { url, width, height }) for SSR */
-  resolvedAssets?: Record<string, { url: string; width?: number | null; height?: number | null }>;
+  /** Pre-resolved assets (asset_id -> { url, filename, width, height }) for SSR */
+  resolvedAssets?: Record<string, ResolvedAsset>;
   /** Map of layer ID → item data for layer-specific field resolution */
   layerDataMap?: Record<string, Record<string, string>>;
   /**
@@ -319,8 +383,8 @@ export interface ResolveFieldLinkOptions {
   rawValue: string;
   fieldType?: string | null;
   context: LinkResolutionContext;
-  /** Asset map for SSR (asset_id -> { public_url, content }) */
-  assetMap?: Record<string, { public_url: string | null; content?: string | null }>;
+  /** Asset map for SSR (asset_id -> asset fields needed to build an href) */
+  assetMap?: Record<string, LinkAssetLike>;
 }
 
 /**
@@ -386,28 +450,15 @@ export function resolveFieldLinkValue(options: ResolveFieldLinkOptions): string 
   if (isAssetFieldType(fieldType as any)) {
     // SSR: use assetMap
     if (assetMap) {
-      const asset = assetMap[rawValue];
-      // SVG assets don't have URLs (they use inline content)
-      if (asset && !asset.public_url && asset.content) {
-        return '#no-svg-url';
-      }
-      return asset?.public_url || rawValue;
+      return resolveAssetLinkHref(rawValue, assetMap[rawValue]) || rawValue;
     }
     // SSR: use pre-resolved assets
     if (resolvedAssets?.[rawValue]) {
-      if (resolvedAssets[rawValue].url.startsWith('<')) {
-        return '#no-svg-url';
-      }
-      return resolvedAssets[rawValue].url;
+      return resolveAssetLinkHref(rawValue, assetFromResolvedEntry(rawValue, resolvedAssets[rawValue])) || '';
     }
     // Client: use getAsset callback
     if (getAsset) {
-      const asset = getAsset(rawValue);
-      // SVG assets don't have URLs (they use inline content)
-      if (asset && !asset.public_url && asset.content) {
-        return '#no-svg-url';
-      }
-      return asset?.public_url || '';
+      return resolveAssetLinkHref(rawValue, getAsset(rawValue)) || '';
     }
     return rawValue;
   }
@@ -430,20 +481,17 @@ export function resolveCollectionLinkValue(
   }
 
   if (linkValue.type === 'asset') {
-    if (!linkValue.asset?.id) return null;
+    const assetId = linkValue.asset?.id;
+    if (!assetId) return null;
 
     // SSR: use pre-resolved assets
-    if (resolvedAssets?.[linkValue.asset.id]) {
-      const resolved = resolvedAssets[linkValue.asset.id];
-      if (resolved.url.startsWith('<')) return '#no-svg-url';
-      return resolved.url;
+    if (resolvedAssets?.[assetId]) {
+      return resolveAssetLinkHref(assetId, assetFromResolvedEntry(assetId, resolvedAssets[assetId]));
     }
 
     // Client: use getAsset callback
     if (getAsset) {
-      const asset = getAsset(linkValue.asset.id);
-      if (asset && !asset.public_url && asset.content) return '#no-svg-url';
-      return asset?.public_url || null;
+      return resolveAssetLinkHref(assetId, getAsset(assetId));
     }
 
     return null;
@@ -460,7 +508,10 @@ export function resolveCollectionLinkValue(
     // Handle dynamic pages with specific collection item
     if (page.is_dynamic && linkValue.page.collection_item_id && collectionItemSlugs) {
       const itemSlug = collectionItemSlugs[linkValue.page.collection_item_id];
-      href = buildLocalizedDynamicPageUrl(page, folders, itemSlug || null, locale, translations || undefined);
+      // Unresolved item slug (empty/missing reference, deleted target) → emit no
+      // link rather than the literal `{slug}` placeholder from the URL pattern.
+      if (!itemSlug) return null;
+      href = buildLocalizedDynamicPageUrl(page, folders, itemSlug, locale, translations || undefined);
     } else {
       // Static page or dynamic page without specific item
       href = buildLocalizedSlugPath(page, folders, 'page', locale, translations || undefined);
@@ -513,7 +564,12 @@ export function generateLinkHref(
   switch (linkSettings.type) {
     case 'url': {
       const urlContent = linkSettings.url?.data?.content || '';
-      href = resolveInlineVariablesFromData(urlContent, collectionItemData, pageCollectionItemData) || '';
+      const resolved = resolveInlineVariablesFromData(urlContent, collectionItemData, pageCollectionItemData) || '';
+      // A link-typed CMS field resolves to a serialized CollectionLinkValue (a field
+      // bound as an inline variable in url content). Unwrap it to a concrete href,
+      // mirroring the `field` link type; plain URLs pass through unchanged.
+      const linkValue = parseCollectionLinkValue(resolved);
+      href = linkValue ? (resolveCollectionLinkValue(linkValue, context) || '') : resolved;
       break;
     }
     case 'email': {
@@ -530,13 +586,7 @@ export function generateLinkHref(
     }
     case 'asset':
       if (linkSettings.asset?.id && getAsset) {
-        const asset = getAsset(linkSettings.asset.id);
-        // SVG assets don't have URLs (they use inline content)
-        if (asset && !asset.public_url && asset.content) {
-          href = '#no-svg-url';
-        } else {
-          href = asset?.public_url || '';
-        }
+        href = resolveAssetLinkHref(linkSettings.asset.id, getAsset(linkSettings.asset.id)) || '';
       }
       break;
     case 'page':
@@ -582,7 +632,13 @@ export function generateLinkHref(
                 break;
             }
 
-            href = buildLocalizedDynamicPageUrl(page, folders, itemSlug || null, locale, translations || undefined);
+            // A specific collection item was requested but its slug could not be
+            // resolved (empty/missing reference, deleted target, or out-of-bounds
+            // next/previous). Emit no href instead of the literal `{slug}` pattern
+            // so the element renders without a broken link.
+            href = itemSlug
+              ? buildLocalizedDynamicPageUrl(page, folders, itemSlug, locale, translations || undefined)
+              : '';
           } else {
             // Static page or dynamic page without specific item
             href = buildLocalizedSlugPath(page, folders, 'page', locale, translations || undefined);

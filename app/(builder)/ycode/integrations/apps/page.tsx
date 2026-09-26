@@ -313,20 +313,7 @@ export default function AppsPage() {
   // Load apps on mount
   // =========================================================================
 
-  useEffect(() => {
-    fetchApps();
-  }, []);
-
-  // Auto-open app settings from ?app= query param (e.g. /ycode/integrations/apps?app=mapbox)
-  useEffect(() => {
-    if (isLoading) return;
-    const appParam = searchParams.get('app');
-    if (appParam && apps.some((a) => a.id === appParam)) {
-      openAppSettings(appParam);
-    }
-  }, [isLoading]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const fetchApps = async () => {
+  const fetchApps = useCallback(async () => {
     try {
       const response = await fetch('/ycode/api/apps');
       const result = await response.json();
@@ -345,7 +332,20 @@ export default function AppsPage() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [getSettingByKey]);
+
+  useEffect(() => {
+    fetchApps();
+  }, [fetchApps]);
+
+  // Auto-open app settings from ?app= query param (e.g. /ycode/integrations/apps?app=mapbox)
+  useEffect(() => {
+    if (isLoading) return;
+    const appParam = searchParams.get('app');
+    if (appParam && apps.some((a) => a.id === appParam)) {
+      openAppSettings(appParam);
+    }
+  }, [isLoading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // =========================================================================
   // App sheet open/close

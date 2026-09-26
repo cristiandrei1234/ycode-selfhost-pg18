@@ -121,6 +121,33 @@ export async function getFormSummaries(): Promise<FormSummary[]> {
 }
 
 /**
+ * Count submissions from an IP since a given timestamp (used for rate limiting)
+ */
+export async function countRecentSubmissionsByIp(
+  ip: string,
+  since: string,
+  tenantId?: string
+): Promise<number> {
+  const client = await getSupabaseAdmin(tenantId);
+
+  if (!client) {
+    throw new Error('Supabase client not configured');
+  }
+
+  const { count, error } = await client
+    .from('form_submissions')
+    .select('id', { count: 'exact', head: true })
+    .eq('metadata->>ip', ip)
+    .gte('created_at', since);
+
+  if (error) {
+    throw new Error(`Failed to count recent form submissions: ${error.message}`);
+  }
+
+  return count || 0;
+}
+
+/**
  * Create a new form submission
  */
 export async function createFormSubmission(
@@ -138,7 +165,7 @@ export async function createFormSubmission(
       form_id: submissionData.form_id,
       payload: submissionData.payload,
       metadata: submissionData.metadata || null,
-      status: 'new',
+      status: submissionData.status || 'new',
       created_at: new Date().toISOString(),
     })
     .select()

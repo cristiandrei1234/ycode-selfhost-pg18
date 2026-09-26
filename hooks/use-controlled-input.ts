@@ -23,7 +23,7 @@
  * ```
  */
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { removeSpaces } from '@/lib/utils';
 
 /**
@@ -40,14 +40,20 @@ export function useControlledInput(
   transform?: (value: string) => string,
   sanitize: boolean = true
 ): [string, (value: string) => void] {
-  const [localValue, setLocalValue] = useState('');
+  const resolveExternal = (value: string | undefined) => {
+    const raw = value || '';
+    return transform ? transform(raw) : raw;
+  };
 
-  // Sync local state when external value changes (e.g., undo/redo, breakpoint switch)
-  useEffect(() => {
-    const valueToSet = externalValue || '';
-    const transformedValue = transform ? transform(valueToSet) : valueToSet;
-    setLocalValue(transformedValue);
-  }, [externalValue, transform]);
+  const [localValue, setLocalValue] = useState(() => resolveExternal(externalValue));
+  const [syncedValue, setSyncedValue] = useState(externalValue);
+
+  // Resync during render rather than in an effect (e.g. undo/redo, breakpoint
+  // switch), so the input never paints a stale value for one frame.
+  if (externalValue !== syncedValue) {
+    setSyncedValue(externalValue);
+    setLocalValue(resolveExternal(externalValue));
+  }
 
   // Wrapper setter with optional sanitization
   const setValueSafely = (value: string) => {

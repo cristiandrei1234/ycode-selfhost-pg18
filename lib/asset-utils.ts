@@ -4,27 +4,40 @@
  */
 
 /**
- * Build a data URL for inline SVG content. When `width`/`height` are provided
- * and the SVG root lacks them, they're injected so `<img>` consumers get
- * intrinsic dimensions — otherwise browsers fall back to 300×150 for SVGs
- * that only carry a viewBox, breaking CSS `w-auto`/`h-auto` sizing.
+ * Ensure inline SVG markup carries intrinsic dimensions. When `width`/`height`
+ * are known and the SVG root lacks them, they're injected so `<img>` consumers
+ * get an intrinsic size — otherwise browsers treat a viewBox-only SVG as having
+ * no dimensions (300×150 fallback, or 0×0 inside flex/`w-auto h-auto`
+ * layouts), which makes the image invisible.
+ *
+ * Every path that hands inline SVG content to an `<img>` must go through this:
+ * data URIs, the `/a/` proxy response and static-export files.
+ */
+export function withSvgIntrinsicSize(
+  content: string,
+  width?: number | null,
+  height?: number | null
+): string {
+  if (!width || !height) return content;
+  return content.replace(/<svg\b([^>]*)>/i, (match, attrs: string) => {
+    const hasWidth = /\swidth\s*=/i.test(attrs);
+    const hasHeight = /\sheight\s*=/i.test(attrs);
+    if (hasWidth && hasHeight) return match;
+    const injected = `${!hasWidth ? ` width="${width}"` : ''}${!hasHeight ? ` height="${height}"` : ''}`;
+    return `<svg${injected}${attrs}>`;
+  });
+}
+
+/**
+ * Build a data URL for inline SVG content, with intrinsic dimensions injected
+ * (see {@link withSvgIntrinsicSize}).
  */
 export function buildSvgDataUrl(
   content: string,
   width?: number | null,
   height?: number | null
 ): string {
-  let svg = content;
-  if (width && height) {
-    svg = svg.replace(/<svg\b([^>]*)>/i, (match, attrs: string) => {
-      const hasWidth = /\swidth\s*=/i.test(attrs);
-      const hasHeight = /\sheight\s*=/i.test(attrs);
-      if (hasWidth && hasHeight) return match;
-      const injected = `${!hasWidth ? ` width="${width}"` : ''}${!hasHeight ? ` height="${height}"` : ''}`;
-      return `<svg${injected}${attrs}>`;
-    });
-  }
-  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
+  return `data:image/svg+xml,${encodeURIComponent(withSvgIntrinsicSize(content, width, height))}`;
 }
 
 /**
@@ -382,6 +395,95 @@ export function getAssetProxyUrl(
 }
 
 /**
+ * Inline-SVG assets (stored as `content`, no storage_path) up to this many
+ * bytes of markup are embedded as data URIs; larger ones are served through
+ * the `/a/` proxy instead.
+ *
+ * A data URI is repeated in every `<img>` that uses it AND again in the RSC
+ * flight payload that hydrates the page, so a 300 KB illustration used twice
+ * adds >1 MB to the HTML — far more than one cacheable request costs. Small
+ * icons/logos stay inline where a round-trip would cost more than the bytes.
+ */
+export const INLINE_SVG_MAX_BYTES = 4096;
+
+/** Minimal asset shape needed to resolve an inline-SVG asset to a URL. */
+export interface InlineSvgAssetLike {
+  id?: string;
+  filename?: string;
+  content?: string | null;
+  content_hash?: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
+/**
+ * 32-bit FNV-1a hash of a string, as 8 lowercase hex chars. Dependency-free so
+ * it runs identically in the browser (canvas) and on the server (SSR, proxy).
+ */
+function fnv1a32Hex(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+/**
+ * Cache-busting version for an inline-SVG asset's `/a/` URL.
+ *
+ * `/a/*` responses are cached immutably, so the version must change whenever
+ * the served bytes change. The proxy serves `content` with the asset's
+ * `width`/`height` injected (see {@link withSvgIntrinsicSize}), so both feed
+ * the hash. Derived from the markup itself rather than `content_hash` because
+ * many existing assets have no stored hash, and an unversioned URL can never
+ * be busted once a browser has cached it. Returns null without content.
+ */
+export function getInlineSvgAssetVersion(
+  asset: Pick<InlineSvgAssetLike, 'content' | 'width' | 'height'>,
+): string | null {
+  if (!asset.content) return null;
+  return fnv1a32Hex(`${asset.content}|${asset.width ?? ''}|${asset.height ?? ''}`);
+}
+
+/**
+ * Build the `/a/` proxy URL for an inline-SVG asset (one with `content` but no
+ * storage_path). The proxy serves `content` with an `image/svg+xml` header.
+ *
+ * A `?v=` version (see {@link getInlineSvgAssetVersion}) is appended so edits
+ * bust the immutable cache and let the proxy pick the row (draft vs published)
+ * whose bytes match.
+ */
+export function getInlineSvgAssetUrl(
+  asset: { id: string; filename: string } & Pick<InlineSvgAssetLike, 'content' | 'width' | 'height'>,
+): string {
+  const hash = uuidToBase62(asset.id);
+  const slug = sanitizeSlug(asset.filename.replace(/\.[^/.]+$/, '')) || 'file';
+  const version = getInlineSvgAssetVersion(asset);
+  return `/a/${hash}/${slug}.svg${version ? `?v=${version}` : ''}`;
+}
+
+/**
+ * Resolve an inline-SVG asset to something usable as an `<img src>`: a data
+ * URI for small markup, the `/a/` proxy URL once it exceeds
+ * `INLINE_SVG_MAX_BYTES`. Falls back to a data URI when the asset lacks the
+ * id/filename needed to build a proxy URL. Returns null without content.
+ */
+export function resolveInlineSvgAssetSrc(asset: InlineSvgAssetLike): string | null {
+  if (!asset.content) return null;
+  if (asset.content.length <= INLINE_SVG_MAX_BYTES || !asset.id || !asset.filename) {
+    return buildSvgDataUrl(asset.content, asset.width, asset.height);
+  }
+  return getInlineSvgAssetUrl({
+    id: asset.id,
+    filename: asset.filename,
+    content: asset.content,
+    width: asset.width,
+    height: asset.height,
+  });
+}
+
+/**
  * Default max width applied to bitmap images served to the builder canvas.
  * Caps decoded image bitmaps so a 11k×6k hero doesn't allocate ~260 MB of
  * RGBA per copy in the iframe.
@@ -392,12 +494,14 @@ const EDITOR_DEFAULT_IMAGE_QUALITY = 80;
 /**
  * Bitmap MIME types we want to size-cap through the proxy in the editor.
  * SVGs are skipped (vector, no decode cost) and videos/audio aren't bitmap
- * decoded at all.
+ * decoded at all. GIFs are skipped too — Sharp collapses animated GIFs to a
+ * single static frame, so downscaling would kill the animation.
  */
 function isBitmapImageMime(mimeType?: string | null): boolean {
   if (!mimeType) return false;
   if (!mimeType.startsWith('image/')) return false;
   if (mimeType === 'image/svg+xml') return false;
+  if (mimeType === 'image/gif') return false;
   return true;
 }
 
@@ -442,9 +546,21 @@ function isProxyUrl(url: string): boolean {
 }
 
 /**
- * Check if a URL supports image transformation params
+ * Cheap extension sniff for formats the proxy never resizes: animated GIFs
+ * (Sharp would flatten them to one frame) and SVGs (vector — a `?width=`
+ * ladder would just re-request the same file under nine URLs).
+ */
+function isNonResizableImageUrl(url: string): boolean {
+  const path = url.split('?')[0].split('#')[0].toLowerCase();
+  return path.endsWith('.gif') || path.endsWith('.svg');
+}
+
+/**
+ * Check if a URL supports image transformation params.
+ * GIFs and SVGs are excluded — see isNonResizableImageUrl.
  */
 function isTransformableUrl(url: string): boolean {
+  if (isNonResizableImageUrl(url)) return false;
   if (isProxyUrl(url)) return true;
   try {
     const urlObj = new URL(url);
@@ -635,6 +751,93 @@ function getInlineImageUrl(srcVar: unknown): string | undefined {
   return typeof content === 'string' ? content : undefined;
 }
 
+// Tailwind's numeric spacing scale: `w-10` = 10 × 0.25rem = 40px.
+const TAILWIND_SPACING_PX = 4;
+// Browser default root font size, used to convert rem/em lengths to px.
+const ROOT_FONT_SIZE_PX = 16;
+
+/**
+ * Parse an absolute CSS length ("40px", "2.5rem", "40") into pixels.
+ * Relative units (%, vw, auto, …) return null — they need layout to resolve.
+ */
+function parseCssLengthPx(value: string): number | null {
+  const match = value.trim().match(/^(\d*\.?\d+)(px|rem|em)?$/i);
+  if (!match) return null;
+  const n = parseFloat(match[1]);
+  if (isNaN(n)) return null;
+  const unit = (match[2] || 'px').toLowerCase();
+  return unit === 'px' ? n : n * ROOT_FONT_SIZE_PX;
+}
+
+/**
+ * Resolve the value part of a Tailwind sizing utility (after `w-` / `size-` /
+ * `max-w-`) into pixels. Handles arbitrary values (`[40px]`, `[2.5rem]`), the
+ * numeric spacing scale (`10` → 40px) and `px`. Named values (`full`, `auto`,
+ * `screen`, fractions) are fluid and return null.
+ */
+function tailwindSizeToPx(value: string): number | null {
+  if (value.startsWith('[') && value.endsWith(']')) {
+    return parseCssLengthPx(value.slice(1, -1));
+  }
+  if (value === 'px') return 1;
+  if (/^\d*\.?\d+$/.test(value)) return parseFloat(value) * TAILWIND_SPACING_PX;
+  return null;
+}
+
+/** True when a class carries a breakpoint or state variant (`md:`, `hover:`). */
+function hasVariantPrefix(cls: string): boolean {
+  const bracket = cls.indexOf('[');
+  const head = bracket === -1 ? cls : cls.slice(0, bracket);
+  return head.includes(':');
+}
+
+/**
+ * Best-effort *rendered* desktop width of a layer in pixels.
+ *
+ * Reads the compiled Tailwind classes (`w-10`, `w-[40px]`, `size-10`,
+ * `max-w-[40px]`) and falls back to `design.sizing` when present (draft /
+ * preview — published pages strip `design` before render). Only unprefixed
+ * (desktop) classes count; breakpoint and state variants are ignored. Later
+ * classes win, matching Tailwind's cascade for same-property utilities.
+ *
+ * Returns null when the width is fluid (`w-full`, `w-1/2`, `%`, `vw`) or
+ * not set — callers should treat null as "unknown", not "small".
+ */
+export function getRenderedWidthPx(layer: Layer): number | null {
+  const classes = Array.isArray(layer.classes)
+    ? layer.classes
+    : (layer.classes || '').split(/\s+/);
+
+  let width: number | null = null;
+  let maxWidth: number | null = null;
+
+  for (const cls of classes) {
+    if (!cls || hasVariantPrefix(cls)) continue;
+
+    if (cls.startsWith('max-w-')) {
+      const px = tailwindSizeToPx(cls.slice(6));
+      if (px !== null) maxWidth = px;
+    } else if (cls.startsWith('size-')) {
+      const px = tailwindSizeToPx(cls.slice(5));
+      if (px !== null) width = px;
+    } else if (cls.startsWith('w-')) {
+      const px = tailwindSizeToPx(cls.slice(2));
+      if (px !== null) width = px;
+    }
+  }
+
+  const sizing = layer.design?.sizing;
+  if (width === null && sizing?.width) {
+    width = parseCssLengthPx(sizing.width);
+  }
+  if (maxWidth === null && sizing?.maxWidth) {
+    maxWidth = parseCssLengthPx(sizing.maxWidth);
+  }
+
+  if (width !== null && maxWidth !== null) return Math.min(width, maxWidth);
+  return width ?? maxWidth;
+}
+
 export interface LcpCandidate {
   layerId: string;
   /** Asset id of the candidate image, when backed by a static asset variable. */
@@ -645,10 +848,14 @@ export interface LcpCandidate {
  * Find the LCP (Largest Contentful Paint) candidate for a given page tree.
  * Walks the tree in render order and returns the first `image`-named layer that:
  *   - is NOT a descendant of a `header`, `footer`, or `nav` layer (logos),
- *   - is NOT backed by an SVG asset (vector logos / icons), and
+ *   - is NOT backed by an SVG asset (vector logos / icons),
+ *   - does NOT render narrower than `minWidth` pixels (avatars, badges), and
  *   - has an effective intrinsic width unknown or at least `minWidth` pixels.
  *
- * Width resolution order:
+ * Rendered width comes from the layer's compiled classes / `design.sizing`
+ * (see {@link getRenderedWidthPx}); unknown (fluid) widths pass through.
+ *
+ * Intrinsic width resolution order:
  *   1. `layer.attributes.width` (parsed as int)
  *   2. Asset record width via `resolvedAssets[assetId]`
  *   3. Unknown — treat as candidate (best effort)
@@ -686,7 +893,14 @@ export function findLcpCandidate(
       // SVGs are vector logos / icons in practice — never the hero image.
       const isSvg = isSvgAsset(asset) || (inlineUrl ? isSvgUrl(inlineUrl) : false);
 
-      if (!isSvg) {
+      // Rendered size beats intrinsic size: a 300px asset displayed at 40px
+      // (avatar, social-proof logo) is never the LCP, and preloading it with
+      // fetchpriority=high steals bandwidth from the real LCP — typically
+      // hero text waiting on its webfont.
+      const renderedWidth = getRenderedWidthPx(layer);
+      const isTiny = renderedWidth !== null && renderedWidth < minWidth;
+
+      if (!isSvg && !isTiny) {
         let width = parseWidth(layer.attributes?.width);
         if (width === null && asset?.width) {
           width = asset.width as number;
@@ -888,12 +1102,11 @@ export function collectLayerAssetIds(
     const linkAssetId = layer.variables?.link?.asset?.id;
     addAssetId(linkAssetId);
 
-    // Lightbox file assets
-    if (layer.settings?.lightbox?.files) {
+    // Lightbox file assets (addAssetId guards non-string/non-UUID values,
+    // so nested arrays or external URLs are safely ignored)
+    if (Array.isArray(layer.settings?.lightbox?.files)) {
       for (const fileId of layer.settings.lightbox.files) {
-        if (fileId && !fileId.startsWith('http') && !fileId.startsWith('/')) {
-          addAssetId(fileId);
-        }
+        addAssetId(fileId);
       }
     }
 

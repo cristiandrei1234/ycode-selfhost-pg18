@@ -19,10 +19,11 @@ import type { Layer, Locale, FormSettings, Component, DesignColorVariable, Passw
 import { getLayerHtmlTag, getClassesString, getText, resolveFieldValue, isTextContentLayer, getCollectionVariable, filterDisabledSliderLayers, applyCustomAttributes } from '@/lib/layer-utils';
 import { getMapIframeProps, DEFAULT_MAP_SETTINGS, resolveMarkerColor } from '@/lib/map-utils';
 import { HTML_TO_REACT_ATTRS } from '@/lib/parse-head-html';
-import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP } from '@/lib/slider-constants';
+import { SWIPER_CLASS_MAP, SWIPER_DATA_ATTR_MAP, SLIDER_BUTTON_ARIA_LABELS, isSliderChromeButton } from '@/lib/slider-constants';
+import { getSliderPresizeVars } from '@/lib/slider-utils';
 import { getDynamicTextContent, getImageUrlFromVariable, getVideoUrlFromVariable, getIframeUrlFromVariable, isFieldVariable, isAssetVariable, isStaticTextVariable, isDynamicTextVariable, getStaticTextContent, getAssetId, resolveDesignStyles } from '@/lib/variable-utils';
 import { getTranslatedAssetId, getTranslatedText } from '@/lib/locale-runtime';
-import { isValidLinkSettings, generateLinkHref, resolveLinkAttrs, isLinkAtCollectionBoundary, isLinkToCurrentPage, type LinkResolutionContext } from '@/lib/link-utils';
+import { isValidLinkSettings, generateLinkHref, resolveLinkAttrs, isLinkAtCollectionBoundary, isLinkToCurrentPage, type LinkResolutionContext, type ResolvedAsset } from '@/lib/link-utils';
 import { DEFAULT_ASSETS, buildImageSizes, generateImageSrcset, getOptimizedImageUrl, getSvgAspectRatioStyle, parseImageDimension } from '@/lib/asset-utils';
 import { resolveInlineVariablesFromData } from '@/lib/inline-variables';
 import { getPaginationLayerKind, paginationTextVariableToTemplate, resolvePaginationTextVariable } from '@/lib/pagination-text-utils';
@@ -33,6 +34,7 @@ import { combineBgValues, mergeStaticBgVars } from '@/lib/tailwind-class-mapper'
 import { clsx } from 'clsx';
 import type { HiddenLayerInfo } from '@/lib/animation-utils';
 import { transformLayerIdsForInstance } from '@/lib/resolve-components';
+import { FormHoneypotField } from '@/components/FormHoneypotField';
 
 /**
  * Per-layer-type code splitting.
@@ -111,7 +113,7 @@ interface LayerRendererPublicProps {
   isPreview?: boolean;
   translations?: Record<string, any> | null;
   anchorMap?: Record<string, string>;
-  resolvedAssets?: Record<string, { url: string; width?: number | null; height?: number | null }>;
+  resolvedAssets?: Record<string, ResolvedAsset>;
   components?: Component[];
   ancestorComponentIds?: Set<string>;
   isSlideChild?: boolean;
@@ -132,6 +134,8 @@ interface LayerRendererPublicProps {
    * uses this context to call the page-auth verify endpoint and redirect on success.
    */
   passwordProtection?: PasswordProtectionContext;
+  /** Immediate parent layer name — used to coerce slider nav children to span. */
+  parentLayerName?: string;
 }
 
 const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
@@ -167,6 +171,7 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
   globalsMeta,
   lcpCandidateLayerId,
   passwordProtection,
+  parentLayerName,
 }) => {
   const anchorMap = useMemo(() => {
     return anchorMapProp || buildAnchorMap(layers);
@@ -285,6 +290,7 @@ const LayerRendererPublic: React.FC<LayerRendererPublicProps> = ({
         globalsMeta={globalsMeta}
         lcpCandidateLayerId={lcpCandidateLayerId}
         passwordProtection={passwordProtection}
+        parentLayerName={parentLayerName}
       />
     );
   };
@@ -321,7 +327,7 @@ const LayerItem: React.FC<{
   isPreview?: boolean;
   translations?: Record<string, any> | null;
   anchorMap?: Record<string, string>;
-  resolvedAssets?: Record<string, { url: string; width?: number | null; height?: number | null }>;
+  resolvedAssets?: Record<string, ResolvedAsset>;
   components?: Component[];
   ancestorComponentIds?: Set<string>;
   isSlideChild?: boolean;
@@ -330,6 +336,7 @@ const LayerItem: React.FC<{
   globalsMeta?: Record<string, GlobalFieldMeta>;
   lcpCandidateLayerId?: string | null;
   passwordProtection?: PasswordProtectionContext;
+  parentLayerName?: string;
 }> = ({
   layer,
   isPublished,
@@ -363,6 +370,7 @@ const LayerItem: React.FC<{
   globalsMeta,
   lcpCandidateLayerId,
   passwordProtection,
+  parentLayerName,
 }) => {
   const classesString = getClassesString(layer);
   const collectionLayerItemId = layer._collectionItemId || collectionItemId;
@@ -392,11 +400,12 @@ const LayerItem: React.FC<{
   // No editor stores are consulted in public mode.
   const getAsset = useCallback((id: string) => {
     if (!resolvedAssets?.[id]) return null;
-    const { url, width, height } = resolvedAssets[id];
+    const { url, filename, width, height } = resolvedAssets[id];
     if (url.startsWith('<')) {
-      return { public_url: null, content: url };
+      // Inline SVG: id/filename let asset links build the `/a/` proxy URL.
+      return { id, filename, public_url: null, content: url, width, height };
     }
-    return { public_url: url, width, height };
+    return { id, filename, public_url: url, width, height };
   }, [resolvedAssets]);
 
   // Shared props passed to nested LayerRendererPublic calls (component instances & rich-text components)
@@ -460,7 +469,7 @@ const LayerItem: React.FC<{
     [layer.id, sharedRendererProps]
   );
 
-  let htmlTag = getLayerHtmlTag(layer);
+  let htmlTag = getLayerHtmlTag(layer, parentLayerName);
 
   const isSimpleTextLayer = isTextContentLayer(layer);
 
@@ -688,8 +697,8 @@ const LayerItem: React.FC<{
   // (e.g. legacy data), extract its text instead of stringifying to "[object Object]".
   const rawImageAltContent = getDynamicTextContent(effectiveImageSettings?.alt) as unknown;
   const rawImageAlt = typeof rawImageAltContent === 'object' && rawImageAltContent !== null
-    ? (extractPlainTextFromTiptap(rawImageAltContent) || 'Image')
-    : String(rawImageAltContent || 'Image');
+    ? (extractPlainTextFromTiptap(rawImageAltContent) || '')
+    : String(rawImageAltContent || '');
   const originalImageAlt = rawImageAlt.includes('<ycode-inline-variable>')
     ? resolveInlineVariablesFromData(rawImageAlt, collectionLayerData, pageCollectionItemData ?? undefined, timezone, effectiveLayerDataMap)
     : rawImageAlt;
@@ -699,7 +708,7 @@ const LayerItem: React.FC<{
     translations,
     pageId,
     layer._masterComponentId
-  ) || 'Image';
+  ) || '';
   const imageAlt = translatedImageAlt;
 
   // Public path: audio/video/icon component variable overrides are pre-baked
@@ -798,7 +807,10 @@ const LayerItem: React.FC<{
 
   const fullClassName = clsx(classesString, paragraphClasses, SWIPER_CLASS_MAP[layer.name], isSlideChild && 'swiper-slide', buttonNeedsFit && 'w-fit', buttonNeedsTextCenter && 'text-center');
 
-  if (layer.settings?.hidden) {
+  // Hidden layers are omitted unless kept in HTML (reveal interaction or
+  // settings.keepInHtml) — those are in `hiddenLayerInfo` and render collapsed
+  // (data-gsap-hidden) instead.
+  if (layer.settings?.hidden && !hiddenLayerInfo?.some((info) => info.layerId === layer.id)) {
     return null;
   }
 
@@ -915,8 +927,6 @@ const LayerItem: React.FC<{
 
     const mergedStyle = { ...parsedAttrStyle, ...filteredDesignStyles, ...bgImageStyle };
 
-    const isEmpty = !textContent && (!children || children.length === 0);
-
     const combinedRef = (node: HTMLElement | null) => {
       if (isFilterLayer) {
         (filterLayerRef as React.MutableRefObject<HTMLDivElement | null>).current = node as HTMLDivElement | null;
@@ -929,7 +939,6 @@ const LayerItem: React.FC<{
       style: mergedStyle,
       'data-layer-id': layer.id,
       'data-layer-type': htmlTag,
-      'data-is-empty': isEmpty ? 'true' : 'false',
       ...normalizedAttributes,
       suppressHydrationWarning: true,
     };
@@ -972,9 +981,23 @@ const LayerItem: React.FC<{
       if (layer.name === 'slider' && layer.settings?.slider) {
         elementProps['data-slider-id'] = layer.id;
         elementProps['data-slider-settings'] = JSON.stringify(layer.settings.slider);
+        // Pre-size slides before Swiper JS runs (prevents a 1-slide flash) only
+        // for numeric multi-view sliders; per-view 1 keeps its own slide widths.
+        const presizeVars = getSliderPresizeVars(layer.settings.slider);
+        if (presizeVars) {
+          elementProps['data-slider-presize'] = '';
+          const existingStyle = (typeof elementProps.style === 'object' && elementProps.style) || {};
+          elementProps.style = { ...existingStyle, ...presizeVars };
+        }
       }
       if (SWIPER_DATA_ATTR_MAP[layer.name]) {
         elementProps[SWIPER_DATA_ATTR_MAP[layer.name]] = '';
+      }
+      if (isSliderChromeButton(layer.name)) {
+        elementProps.type = 'button';
+        if (!elementProps['aria-label']) {
+          elementProps['aria-label'] = SLIDER_BUTTON_ARIA_LABELS[layer.name];
+        }
       }
 
       // Lightbox data attributes (LightboxInitializer)
@@ -998,8 +1021,12 @@ const LayerItem: React.FC<{
       }
     }
 
-    // Hide elements with hiddenGenerated: true by default (in all modes)
-    if (layer.hiddenGenerated) {
+    // Hide elements with hiddenGenerated: true by default (in all modes).
+    // Scoped to alerts only: the flag is meant for form success/error alerts,
+    // whose reveal path clears inline display. Non-alert layers (e.g. animated
+    // dropdowns) manage visibility via data-gsap-hidden and must not be pinned
+    // to display:none here.
+    if (layer.hiddenGenerated && layer.alertType) {
       const existingStyle = typeof elementProps.style === 'object' ? elementProps.style : {};
       elementProps.style = { ...existingStyle, display: 'none' };
     }
@@ -1069,10 +1096,11 @@ const LayerItem: React.FC<{
 
       const isLcpCandidate = !!lcpCandidateLayerId && layer.id === lcpCandidateLayerId;
       const imgLoadingAttr = layer.attributes?.loading as string | undefined;
-      // LCP candidate always loads eagerly with high fetchpriority — overrides
-      // the image template's default `loading="lazy"`. Other images keep
-      // whatever the user/template set.
-      const effectiveLoading = isLcpCandidate ? 'eager' : imgLoadingAttr;
+      // LCP candidate always loads eagerly with high fetchpriority. Every other
+      // image falls back to `lazy` when no explicit value is set: React 19
+      // auto-emits `<link rel="preload" as="image">` for any non-lazy <img>, so
+      // an unset attribute would wastefully preload below-the-fold images.
+      const effectiveLoading = isLcpCandidate ? 'eager' : (imgLoadingAttr ?? 'lazy');
 
       const optimizedSrc = getOptimizedImageUrl(finalImageUrl, 1920, 85);
 
@@ -1170,7 +1198,7 @@ const LayerItem: React.FC<{
       }
     }
 
-    if (htmlTag === 'button' && isInsideForm) {
+    if (htmlTag === 'button' && isInsideForm && !isSliderChromeButton(layer.name)) {
       if (!normalizedAttributes.type || normalizedAttributes.type === 'button') {
         elementProps.type = 'submit';
       }
@@ -1411,6 +1439,9 @@ const LayerItem: React.FC<{
       // instead of collapsing. Inert when both dimensions are explicitly set.
       const iconAspectRatio = getSvgAspectRatioStyle(iconHtml);
       const iconElementStyle = (typeof elementProps.style === 'object' && elementProps.style) || undefined;
+      if (elementProps['aria-hidden'] == null && elementProps['aria-label'] == null) {
+        elementProps['aria-hidden'] = true;
+      }
 
       return (
         <Tag
@@ -1430,7 +1461,7 @@ const LayerItem: React.FC<{
           data-layer-id={layer.id}
           data-layer-type="htmlEmbed"
           data-html-embed="true"
-          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+          sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals"
           className={fullClassName}
           style={{
             width: '100%',
@@ -1438,7 +1469,8 @@ const LayerItem: React.FC<{
             display: 'block',
             ...mergedStyle,
           }}
-          title={`Code Embed ${layer.id}`}
+          title="Code embed"
+          loading="lazy"
         />
       );
     }
@@ -1494,6 +1526,7 @@ const LayerItem: React.FC<{
               display: 'block',
             }}
             title="Map"
+            loading="lazy"
             suppressHydrationWarning
           />
         </div>
@@ -1531,7 +1564,8 @@ const LayerItem: React.FC<{
             className: fullClassName,
             style: mergedStyle,
             src: embedUrl,
-            frameBorder: '0',
+            title: 'YouTube video',
+            loading: 'lazy',
             allow: 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture',
             allowFullScreen: true,
           };
@@ -1743,6 +1777,7 @@ const LayerItem: React.FC<{
               components={componentsProp}
               ancestorComponentIds={effectiveAncestorIds}
               isSlideChild={layer.name === 'slides'}
+              parentLayerName={layer.name}
               serverSettings={serverSettings}
               lcpCandidateLayerId={lcpCandidateLayerId}
             />
@@ -1790,6 +1825,7 @@ const LayerItem: React.FC<{
               isInsideLink={isInsideLink || htmlTag === 'a' || willWrapWithLink}
               parentFormSettings={htmlTag === 'form' ? layer.settings?.form : parentFormSettings}
               ancestorComponentIds={effectiveAncestorIds}
+              parentLayerName={layer.name}
             />
           )}
 
@@ -1810,6 +1846,10 @@ const LayerItem: React.FC<{
       <Tag {...elementProps}>
         {textContent && textContent}
 
+        {htmlTag === 'form' && layer.settings?.form?.form_type !== 'password_protected' && (
+          <FormHoneypotField />
+        )}
+
         {effectiveChildren && effectiveChildren.length > 0 && (
           <LayerRendererPublic
             layers={effectiveChildren}
@@ -1819,6 +1859,7 @@ const LayerItem: React.FC<{
             parentFormSettings={htmlTag === 'form' ? layer.settings?.form : parentFormSettings}
             ancestorComponentIds={effectiveAncestorIds}
             isSlideChild={layer.name === 'slides'}
+            parentLayerName={layer.name}
           />
         )}
       </Tag>

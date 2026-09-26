@@ -5,6 +5,7 @@
  */
 
 import { NextResponse } from 'next/server';
+import { headers } from 'next/headers';
 import { credentials } from '@/lib/credentials';
 
 import { getAllPages } from '@/lib/repositories/pageRepository';
@@ -19,8 +20,11 @@ import {
   generateSitemapXml,
   getDefaultSitemapSettings,
 } from '@/lib/sitemap-utils';
-import { getSiteBaseUrl } from '@/lib/url-utils';
+import { getRequestOrigin, getSiteBaseUrl } from '@/lib/url-utils';
 import type { SitemapSettings, Translation, CollectionItem } from '@/types';
+
+// Reads the request origin, so it can never be prerendered at build time
+export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
@@ -56,7 +60,8 @@ export async function GET() {
     }
 
     // Auto-generate sitemap
-    const baseUrl = getSiteBaseUrl({ globalCanonicalUrl }) || '';
+    const requestOrigin = getRequestOrigin(await headers());
+    const baseUrl = getSiteBaseUrl({ globalCanonicalUrl, requestOrigin }) || '';
 
     // Fetch published pages and folders
     const [pages, folders, locales] = await Promise.all([

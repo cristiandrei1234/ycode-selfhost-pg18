@@ -3,15 +3,16 @@ import BodyClassApplier from '@/components/BodyClassApplier';
 import ContentHeightReporter from '@/components/ContentHeightReporter';
 import CustomCodeInjector from '@/components/CustomCodeInjector';
 import LayerRendererPublic from '@/components/LayerRendererPublic';
-import SliderInitializer from '@/components/SliderInitializer';
 import LightboxInitializer from '@/components/LightboxInitializer';
 import PasswordForm from '@/components/PasswordForm';
+import SliderInitializer from '@/components/SliderInitializer';
 import YcodeBadge from '@/components/YcodeBadge';
 import { unstable_cache } from 'next/cache';
 import { resolveCustomCodePlaceholders } from '@/lib/resolve-cms-variables';
-import { renderRootLayoutHeadCode } from '@/lib/parse-head-html';
 import { generateInitialAnimationCSS, type HiddenLayerInfo } from '@/lib/animation-utils';
-import { buildCustomFontsCss, buildFontClassesCss, fetchGoogleFontsCss, getGoogleFontLinks } from '@/lib/font-utils';
+import { buildCustomFontsCss, buildFontClassesCss, fetchGoogleFontsCss, getCustomFontPreloads, getGoogleFontLinks } from '@/lib/font-utils';
+import type { FontPreload } from '@/lib/font-utils';
+import { findLcpTextFont, getLcpFontPreloads } from '@/lib/font-preload';
 import { buildImageSizes, collectLayerAssetIds, findLcpCandidate, generateImageSrcset, getAssetProxyUrl, getOptimizedImageUrl } from '@/lib/asset-utils';
 import { getAllPages } from '@/lib/repositories/pageRepository';
 import { getAllPageFolders } from '@/lib/repositories/pageFolderRepository';
@@ -22,11 +23,11 @@ import { getSettingByKey } from '@/lib/repositories/settingsRepository';
 import { getItemsWithValues, getItemsWithValuesByIds } from '@/lib/repositories/collectionItemRepository';
 import { getValuesByItemIds } from '@/lib/repositories/collectionItemValueRepository';
 import { getFieldsByCollectionId } from '@/lib/repositories/collectionFieldRepository';
-import { REF_PAGE_PREFIX, REF_COLLECTION_PREFIX, isCollectionItemKeyword, parseCollectionLinkValue } from '@/lib/link-utils';
+import { REF_PAGE_PREFIX, REF_COLLECTION_PREFIX, isCollectionItemKeyword, parseCollectionLinkValue, type ResolvedAsset } from '@/lib/link-utils';
 import { getClassesString, hasPasswordFormLayer } from '@/lib/layer-utils';
 import { buildGlobalsMetaMap, buildGlobalsValueMap } from '@/lib/collection-field-utils';
 import { buildLocalizedPageUrls, type LocalizedDynamicSlug } from '@/lib/page-utils';
-import { getTranslatableKey } from '@/lib/locale-runtime';
+import { getTranslatableKey, slimTranslations } from '@/lib/locale-runtime';
 import { getSlugTranslationsByLocale } from '@/lib/repositories/translationRepository';
 import type { Layer, BackgroundsDesign, Component, Page, CollectionItemWithValues, CollectionField, Locale, PageFolder, PasswordProtectionContext, Translation } from '@/types';
 
@@ -205,6 +206,16 @@ function stripSSROnlyData(layers: Layer[]): Layer[] {
     delete stripped._collectionItemSlug;
     delete stripped._layerDataMap;
 
+    // Editor/server-only fields the public renderer never reads: `customName`
+    // (tree label), `open` (tree expand state), `restrictions` (copy/delete/move/
+    // editText guards) and `_originalLayerId` (server-side translation-lookup
+    // marker, consumed before this point). Embed iframe titles now use static
+    // generic strings instead of `customName`, so it is safe to drop here.
+    delete stripped.customName;
+    delete stripped.open;
+    delete stripped.restrictions;
+    delete (stripped as { _originalLayerId?: string })._originalLayerId;
+
     // Builder-only style resolution inputs. The flat `classes` string is the
     // already-resolved output, so the public renderer never reads these.
     delete stripped.styleIds;
@@ -251,12 +262,15 @@ function stripSSROnlyData(layers: Layer[]): Layer[] {
 /** Extract minimal animation data from the layer tree for AnimationInitializer */
 function extractAnimationLayers(layers: Layer[]): Layer[] {
   return layers
-    .filter(layer => layer.interactions?.length || layer.children?.length)
+    // Keep `settings.hidden` layers: an interaction may reveal one, and the
+    // runtime needs the flag to keep it collapsed across breakpoint resets.
+    .filter(layer => layer.interactions?.length || layer.children?.length || layer.settings?.hidden)
     .map(layer => ({
       id: layer.id,
       name: layer.name,
       classes: '',
       interactions: layer.interactions,
+      ...(layer.settings?.hidden ? { settings: { hidden: true, keepInHtml: layer.settings.keepInHtml } } : {}),
       children: layer.children ? extractAnimationLayers(layer.children) : undefined,
     }));
 }
@@ -340,6 +354,7 @@ interface PageRendererProps {
   isPreview?: boolean;
   translations?: Record<string, any> | null;
   gaMeasurementId?: string | null;
+  /** Injected into `<head>` by SiteDocumentLayout. Kept for existing call sites. */
   globalCustomCodeHead?: string | null;
   globalCustomCodeBody?: string | null;
   ycodeBadge?: boolean;
@@ -382,7 +397,6 @@ export default async function PageRenderer({
   isPreview = false,
   translations,
   gaMeasurementId,
-  globalCustomCodeHead,
   globalCustomCodeBody,
   ycodeBadge = true,
   passwordProtection,
@@ -557,20 +571,16 @@ export default async function PageRenderer({
     }
   }
 
-  // Extract custom code from page settings and resolve placeholders for dynamic pages
-  const rawPageCustomCodeHead = page.settings?.custom_code?.head || '';
+  // Extract custom body code from page settings and resolve placeholders for
+  // dynamic pages. Custom head code is injected by SiteDocumentLayout from
+  // the URL slug, so it is present in the real <head> of the SSR HTML.
   const rawPageCustomCodeBody = page.settings?.custom_code?.body || '';
 
-  const pageCustomCodeHead = page.is_dynamic && collectionItem
-    ? resolveCustomCodePlaceholders(rawPageCustomCodeHead, collectionItem, collectionFields)
-    : rawPageCustomCodeHead;
-
   const pageCustomCodeBody = page.is_dynamic && collectionItem
-    ? resolveCustomCodePlaceholders(rawPageCustomCodeBody, collectionItem, collectionFields)
+    ? await resolveCustomCodePlaceholders(rawPageCustomCodeBody, collectionItem, collectionFields, usePublishedData)
     : rawPageCustomCodeBody;
 
   const { bodyClasses, childLayers: rawChildLayers } = extractBodyLayer(resolvedLayers);
-  const hasLayers = rawChildLayers.length > 0;
 
   // Generate CSS for initial animation states to prevent flickering
   const { css: initialAnimationCSS, hiddenLayerInfo } = generateInitialAnimationCSS(resolvedLayers);
@@ -585,12 +595,14 @@ export default async function PageRenderer({
   let fontsCss = '';
   let googleFontsInlinedCss = '';
   let googleFontLinkUrls: string[] = [];
+  let fontPreloads: FontPreload[] = [];
   try {
     const { getAllFonts: getAllDraftFonts } = await import('@/lib/repositories/fontRepository');
     const { getPublishedFonts } = await import('@/lib/repositories/fontRepository');
     const fonts = isPreview ? await getAllDraftFonts() : await getPublishedFonts();
     fontsCss = buildCustomFontsCss(fonts) + buildFontClassesCss(fonts);
     googleFontLinkUrls = getGoogleFontLinks(fonts);
+    fontPreloads = getCustomFontPreloads(fonts);
 
     // Inline the resolved @font-face CSS so the browser skips the blocking
     // round-trip to fonts.googleapis.com and goes straight to gstatic for
@@ -601,6 +613,14 @@ export default async function PageRenderer({
         [`google-fonts-css-${googleFontLinkUrls.join('|')}`],
         { tags: ['all-pages'], revalidate: false },
       )();
+
+      // Preload the one Google Font file the likely LCP text (first heading)
+      // renders in. Inlining the CSS above removes the stylesheet round-trip,
+      // but the browser still discovers the woff2 only after layout — on a
+      // text-hero page that discovery gap is the LCP.
+      fontPreloads = fontPreloads.concat(
+        getLcpFontPreloads(googleFontsInlinedCss, findLcpTextFont(rawChildLayers, bodyClasses)),
+      );
     }
   } catch (error) {
     console.error('[PageRenderer] Error loading fonts:', error);
@@ -664,7 +684,7 @@ export default async function PageRenderer({
   // Use draft assets (isPublished=false) for preview mode, published assets otherwise
   // `mimeType` is tracked locally so the LCP heuristic can skip SVG logos;
   // it is stripped before passing the map across the client boundary.
-  type ResolvedAssetEntry = { url: string; width?: number | null; height?: number | null; mimeType?: string };
+  type ResolvedAssetEntry = ResolvedAsset & { mimeType?: string };
   let resolvedAssetsWithMime: Record<string, ResolvedAssetEntry> | undefined;
   if (layerAssetIds.size > 0) {
     try {
@@ -682,7 +702,8 @@ export default async function PageRenderer({
           url = asset.content;
         }
         if (url) {
-          resolvedAssetsWithMime[id] = { url, width: asset.width, height: asset.height, mimeType: asset.mime_type };
+          // `filename` lets links to inline-SVG assets build their `/a/` proxy URL.
+          resolvedAssetsWithMime[id] = { url, filename: asset.filename, width: asset.width, height: asset.height, mimeType: asset.mime_type };
         }
       }
     } catch (error) {
@@ -714,24 +735,16 @@ export default async function PageRenderer({
   }
 
   // Strip mimeType before crossing the client component boundary — only
-  // url/width/height are part of the shared `resolvedAssets` contract.
-  const resolvedAssets: Record<string, { url: string; width?: number | null; height?: number | null }> | undefined =
+  // url/filename/width/height are part of the shared `resolvedAssets` contract.
+  const resolvedAssets: Record<string, ResolvedAsset> | undefined =
     resolvedAssetsWithMime
       ? Object.fromEntries(
-        Object.entries(resolvedAssetsWithMime).map(([id, { url, width, height }]) => [id, { url, width, height }])
+        Object.entries(resolvedAssetsWithMime).map(([id, { url, filename, width, height }]) => [id, { url, filename, width, height }])
       )
       : undefined;
 
   return (
     <>
-      {/* Global head code fallback when layout skips it (SKIP_SETUP mode) */}
-      {process.env.SKIP_SETUP === 'true' && globalCustomCodeHead && (
-        renderRootLayoutHeadCode(globalCustomCodeHead, 'global-head')
-      )}
-
-      {/* Page-specific custom head code — React 19 hoists meta/link/style/title to <head> */}
-      {pageCustomCodeHead && renderRootLayoutHeadCode(pageCustomCodeHead, 'page-head')}
-
       {/* Preload the LCP image so the browser starts the fetch from <head>
           rather than waiting until the parser reaches the <img> tag. Pairs
           with the eager + fetchpriority=high props the renderer sets on the
@@ -812,6 +825,21 @@ export default async function PageRenderer({
         ))
       )}
 
+      {/* Preload uploaded custom font binaries plus the LCP heading's Google
+          Font file so the browser fetches them from <head> instead of after
+          CSS parsing, shrinking the font swap window. `crossOrigin` is
+          required — fonts are always fetched in CORS mode. */}
+      {fontPreloads.map((font) => (
+        <link
+          key={`font-preload-${font.href}`}
+          rel="preload"
+          as="font"
+          href={font.href}
+          type={font.type}
+          crossOrigin="anonymous"
+        />
+      ))}
+
       {/* Inject custom font @font-face rules and font class CSS */}
       {fontsCss && (
         <style
@@ -849,21 +877,17 @@ export default async function PageRenderer({
         </>
       )}
 
-      {/* Apply body layer classes immediately to prevent FOUC */}
-      <script
-        dangerouslySetInnerHTML={{
-          __html: `document.body.className=document.body.className.replace(/\\bycode-body-applied\\b/g,'')+' ${(bodyClasses || 'bg-white').replace(/'/g, "\\'")} ycode-body-applied'`,
-        }}
-      />
-      <BodyClassApplier classes={bodyClasses || 'bg-white'} />
+      {/* Error pages (401/404) can render inside a layout that resolved a
+          different URL's body classes. Replace them before the next paint. */}
+      {page.error_page != null && (
+        <BodyClassApplier classes={bodyClasses || 'bg-white'} />
+      )}
 
-      <main
+      <div
         id="ybody"
         className="contents"
         data-layer-id="body"
         data-layer-type="div"
-        data-is-empty={hasLayers ? 'false' : 'true'}
-        lang={(locale?.code || availableLocales.find((l) => l.is_default)?.code) || undefined}
       >
         <LayerRendererPublic
           layers={childLayers}
@@ -880,9 +904,17 @@ export default async function PageRenderer({
           folders={folders as any}
           collectionItemSlugs={collectionItemSlugs}
           isPreview={isPreview}
-          translations={translations}
+          // Text/media translations are already baked into the layer tree
+          // server-side, so the client only needs slug rows to build localized
+          // link hrefs. Slimming keeps the full per-locale catalog out of the
+          // RSC payload (see issue #447 for the same treatment of components).
+          translations={slimTranslations(translations)}
           resolvedAssets={resolvedAssets}
-          components={components}
+          // Rich-text embedded components are already pre-resolved into the layer
+          // tree (_resolvedLayers), so the client renderer never needs the full
+          // component library. Passing [] avoids serializing every component
+          // definition into the RSC payload (see issue #447).
+          components={[]}
           serverSettings={serverSettings}
           globalsData={Object.keys(globalsData).length > 0 ? globalsData : undefined}
           globalsMeta={Object.keys(globalsMeta).length > 0 ? globalsMeta : undefined}
@@ -900,7 +932,7 @@ export default async function PageRenderer({
             isPublished={passwordProtection.isPublished}
           />
         )}
-      </main>
+      </div>
 
       {/* Initialize GSAP animations based on layer interactions.
           Skipped entirely when no layer has interactions so we don't ship

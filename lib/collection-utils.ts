@@ -211,6 +211,27 @@ export function slugify(name: string): string {
 }
 
 /**
+ * Generate a URL-safe slug that is unique within a set of existing slugs.
+ * Appends an incrementing suffix (`-1`, `-2`, ...) on collision and records
+ * the result in `existingSlugs` so subsequent calls stay unique.
+ * @param value - Source text to slugify (falls back to "item" when empty)
+ * @param existingSlugs - Mutable set of slugs already taken
+ */
+export function generateUniqueSlug(value: string | null | undefined, existingSlugs: Set<string>): string {
+  const base = slugify(value || 'item');
+  if (!existingSlugs.has(base)) {
+    existingSlugs.add(base);
+    return base;
+  }
+
+  let n = 1;
+  while (existingSlugs.has(`${base}-${n}`)) n++;
+  const unique = `${base}-${n}`;
+  existingSlugs.add(unique);
+  return unique;
+}
+
+/**
  * Validate field name format (lowercase, alphanumeric, underscores)
  * @param fieldName - The field name to validate
  * @returns True if valid
@@ -362,6 +383,10 @@ export function remapLayerIdsForCollectionItem(layer: Layer, suffix: string): La
     const remapped: Layer = {
       ...l,
       id: `${l.id}${suffix}`,
+      // Preserve the pre-suffix id so translation injection (which runs after
+      // collection expansion and keys off the original template layer id) can
+      // still resolve static text translations for layers rendered per item.
+      _originalLayerId: (l as Layer)._originalLayerId || l.id,
     };
 
     if (l.interactions?.length) {

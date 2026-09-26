@@ -134,6 +134,7 @@ function GlobalImagePreview({ assetId }: GlobalImagePreviewProps) {
               dangerouslySetInnerHTML={{ __html: asset.content }}
             />
           ) : imageUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
             <img
               src={getOptimizedImageUrl(imageUrl)}
               alt={asset.filename || 'Image'}

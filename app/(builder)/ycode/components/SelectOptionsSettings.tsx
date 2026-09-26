@@ -802,7 +802,9 @@ export default function SelectOptionsSettings({
         buildOptionLayer(descExisting?.id || generateId('lyr'), descExisting?.label || 'Descending', 'desc'),
       ],
     });
-  }, [layer?.id, isSortOrderMode, currentOptionSignature, onLayerUpdate]);
+    // Keyed on layer.id, not the whole layer: this effect calls onLayerUpdate, so
+    // depending on the layer object's identity would re-trigger it in a loop.
+  }, [layer?.id, isSortOrderMode, currentOptionSignature, onLayerUpdate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Regenerate sort-by option children when field selection or field data changes.
   useEffect(() => {
@@ -827,7 +829,9 @@ export default function SelectOptionsSettings({
       .map((field) => buildOptionLayer(`${layer.id}-sbf-${field!.id}`, field!.name, field!.id));
 
     onLayerUpdate(layer.id, { children: [noneChild, ...fieldChildren] });
-  }, [layer?.id, isSortByMode, sortByCollectionId, sortByFieldIds, sortByCollectionFields, currentOptionSignature, onLayerUpdate]);
+    // Keyed on layer.id, not the whole layer: this effect calls onLayerUpdate, so
+    // depending on the layer object's identity would re-trigger it in a loop.
+  }, [layer?.id, isSortByMode, sortByCollectionId, sortByFieldIds, sortByCollectionFields, currentOptionSignature, onLayerUpdate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Track which collection has already had its text child auto-bound to prevent re-binding
   const autoBindAppliedForRef = useRef<string | null>(null);
@@ -865,7 +869,9 @@ export default function SelectOptionsSettings({
       },
     });
     autoBindAppliedForRef.current = collectionId;
-  }, [layer?.id, isInputGroupWrapper, isCollectionSource, displayField, layer?.children, onLayerUpdate]);
+    // Keyed on layer.id/children, not the whole layer: this effect calls onLayerUpdate,
+    // so depending on the layer object's identity would re-trigger it in a loop.
+  }, [layer?.id, isInputGroupWrapper, isCollectionSource, displayField, layer?.children, onLayerUpdate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!layer || (!isSelectLayer && !isCheckboxWrapper && !isRadioWrapper)) {
     return null;
@@ -1022,7 +1028,7 @@ export default function SelectOptionsSettings({
                         />
                       </Button>
                     </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="min-w-[var(--radix-dropdown-menu-trigger-width)]">
+                    <DropdownMenuContent align="end" className="min-w-(--radix-dropdown-menu-trigger-width)">
                       {sourceItems.map((item) => (
                         <DropdownMenuCheckboxItem
                           key={item.id}
@@ -1208,7 +1214,7 @@ export default function SelectOptionsSettings({
                           </div>
                         </Button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent className="w-[var(--radix-dropdown-menu-trigger-width)]">
+                      <DropdownMenuContent className="w-(--radix-dropdown-menu-trigger-width)">
                         {sortByCollectionFields.map((field) => (
                           <DropdownMenuCheckboxItem
                             key={field.id}

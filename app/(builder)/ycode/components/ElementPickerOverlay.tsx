@@ -24,6 +24,8 @@ export default function ElementPickerOverlay({ iframeElement, zoom }: ElementPic
 
   const origin = elementPicker?.originPosition;
   const validate = elementPicker?.validate;
+  const isPickerActive = elementPicker?.active;
+  const onSelectElement = elementPicker?.onSelect;
   const scale = zoom / 100;
 
   const findLayerInIframe = useCallback((iframeX: number, iframeY: number): HoveredElement | null => {
@@ -77,7 +79,7 @@ export default function ElementPickerOverlay({ iframeElement, zoom }: ElementPic
 
   // Parent window event listeners
   useEffect(() => {
-    if (!elementPicker?.active) return;
+    if (!isPickerActive) return;
 
     const handleMouseMove = (e: MouseEvent) => {
       setMousePos({ x: e.clientX, y: e.clientY });
@@ -89,8 +91,8 @@ export default function ElementPickerOverlay({ iframeElement, zoom }: ElementPic
       e.preventDefault();
       e.stopPropagation();
       const found = findLayerInParent(e.clientX, e.clientY);
-      if (found && found.isValid && elementPicker.onSelect) {
-        elementPicker.onSelect(found.layerId);
+      if (found && found.isValid && onSelectElement) {
+        onSelectElement(found.layerId);
       } else {
         toast.error('Please select an input element inside a Filter form.');
       }
@@ -114,11 +116,11 @@ export default function ElementPickerOverlay({ iframeElement, zoom }: ElementPic
       window.removeEventListener('click', handleClick, true);
       window.removeEventListener('keydown', handleEscape, true);
     };
-  }, [elementPicker?.active, elementPicker?.onSelect, findLayerInParent, stopElementPicker]);
+  }, [isPickerActive, onSelectElement, findLayerInParent, stopElementPicker]);
 
   // Iframe event listeners
   useEffect(() => {
-    if (!elementPicker?.active || !iframeElement) return;
+    if (!isPickerActive || !iframeElement) return;
     const iframeDoc = iframeElement.contentDocument;
     if (!iframeDoc) return;
 
@@ -135,8 +137,8 @@ export default function ElementPickerOverlay({ iframeElement, zoom }: ElementPic
       e.preventDefault();
       e.stopPropagation();
       const found = findLayerInIframe(e.clientX, e.clientY);
-      if (found && found.isValid && elementPicker.onSelect) {
-        elementPicker.onSelect(found.layerId);
+      if (found && found.isValid && onSelectElement) {
+        onSelectElement(found.layerId);
       } else {
         toast.error('Please select an input element inside a Filter form.');
       }
@@ -161,17 +163,17 @@ export default function ElementPickerOverlay({ iframeElement, zoom }: ElementPic
       iframeDoc.removeEventListener('keydown', handleEscape, true);
       iframeDoc.body.style.cursor = '';
     };
-  }, [elementPicker?.active, elementPicker?.onSelect, iframeElement, scale, findLayerInIframe, stopElementPicker]);
+  }, [isPickerActive, onSelectElement, iframeElement, scale, findLayerInIframe, stopElementPicker]);
 
   // Reset state when picker deactivates
   useEffect(() => {
-    if (!elementPicker?.active) {
+    if (!isPickerActive) {
       setMousePos(null);
       setHoveredElement(null);
     }
-  }, [elementPicker?.active]);
+  }, [isPickerActive]);
 
-  if (!elementPicker?.active || !origin || !mousePos) return null;
+  if (!isPickerActive || !origin || !mousePos) return null;
 
   const snapToTarget = hoveredElement?.isValid;
   const endX = snapToTarget
@@ -195,7 +197,7 @@ export default function ElementPickerOverlay({ iframeElement, zoom }: ElementPic
   return (
     <svg
       ref={overlayRef}
-      className="fixed inset-0 z-[9999] pointer-events-none"
+      className="fixed inset-0 z-9999 pointer-events-none"
       style={{ width: '100vw', height: '100vh', cursor: 'crosshair' }}
     >
       {/* Bezier connector line */}
